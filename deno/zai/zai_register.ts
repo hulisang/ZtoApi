@@ -1252,6 +1252,30 @@ const HTML_PAGE = `<!DOCTYPE html>
                         <input type="text" id="pushplusToken" value="" placeholder="留空则不发送通知"
                             class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring focus:ring-indigo-200 transition">
                     </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">目标注册账户数</label>
+                        <input type="number" id="targetAccounts" value="1000000" min="1" max="10000000"
+                            class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring focus:ring-indigo-200 transition">
+                        <p class="text-xs text-gray-500 mt-1">默认100万</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">HTTP超时 (秒)</label>
+                        <input type="number" id="httpTimeout" value="30" min="5" max="120"
+                            class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring focus:ring-indigo-200 transition">
+                        <p class="text-xs text-gray-500 mt-1">默认30秒</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">批量保存大小</label>
+                        <input type="number" id="batchSaveSize" value="10" min="1" max="100"
+                            class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring focus:ring-indigo-200 transition">
+                        <p class="text-xs text-gray-500 mt-1">默认10条</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">连接池大小</label>
+                        <input type="number" id="connectionPoolSize" value="100" min="10" max="500"
+                            class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring focus:ring-indigo-200 transition">
+                        <p class="text-xs text-gray-500 mt-1">默认100</p>
+                    </div>
                     <div class="flex items-center md:col-span-2">
                         <input type="checkbox" id="enableNotification" checked class="w-5 h-5 text-indigo-600 rounded">
                         <label class="ml-3 text-sm font-medium text-gray-700">启用 PushPlus 通知</label>
@@ -1763,10 +1787,14 @@ const HTML_PAGE = `<!DOCTYPE html>
                 }
                 const config = await response.json();
                 $('#emailTimeout').val(config.emailTimeout);
-                $('#emailCheckInterval').val(config.emailCheckInterval || 1);
+                $('#emailCheckInterval').val(config.emailCheckInterval || 6);
                 $('#registerDelay').val(config.registerDelay);
                 $('#retryTimes').val(config.retryTimes);
-                $('#concurrency').val(config.concurrency || 1);
+                $('#concurrency').val(config.concurrency || 50);
+                $('#targetAccounts').val(config.targetAccounts || 1000000);
+                $('#httpTimeout').val(config.httpTimeout || 30);
+                $('#batchSaveSize').val(config.batchSaveSize || 10);
+                $('#connectionPoolSize').val(config.connectionPoolSize || 100);
                 $('#enableNotification').prop('checked', config.enableNotification);
                 $('#pushplusToken').val(config.pushplusToken || '');
             } catch (error) {
@@ -1834,6 +1862,10 @@ const HTML_PAGE = `<!DOCTYPE html>
                     registerDelay: parseInt($('#registerDelay').val()),
                     retryTimes: parseInt($('#retryTimes').val()),
                     concurrency: parseInt($('#concurrency').val()),
+                    targetAccounts: parseInt($('#targetAccounts').val()),
+                    httpTimeout: parseInt($('#httpTimeout').val()),
+                    batchSaveSize: parseInt($('#batchSaveSize').val()),
+                    connectionPoolSize: parseInt($('#connectionPoolSize').val()),
                     enableNotification: $('#enableNotification').is(':checked'),
                     pushplusToken: $('#pushplusToken').val().trim()
                 };
