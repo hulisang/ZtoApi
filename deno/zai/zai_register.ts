@@ -240,16 +240,16 @@ function clearLoginFailure(ip: string): void {
 
 // 注册配置
 let registerConfig = {
-  emailTimeout: 300,  // 邮件检查超时(秒) - 对应EMAIL_CHECK_TIMEOUT
-  emailCheckInterval: 6,  // 邮件检查间隔(秒) - 对应EMAIL_CHECK_INTERVAL
-  registerDelay: 1000,  // 注册间隔(毫秒) - 对应RETRY_DELAY*1000
-  retryTimes: 3,  // 重试次数 - 对应MAX_RETRIES
-  concurrency: 50,  // 最大并发数 - 对应MAX_CONCURRENCY (1-100)
-  targetAccounts: 1000000,  // 目标注册账户数量 - 对应TARGET_ACCOUNTS
-  httpTimeout: 30,  // HTTP请求超时(秒) - 对应HTTP_TIMEOUT
-  batchSaveSize: 10,  // 批量保存大小 - 对应BATCH_SAVE_SIZE
-  connectionPoolSize: 100,  // 连接池大小 - 对应CONNECTION_POOL_SIZE
-  enableNotification: false,  // 通知默认关
+  emailTimeout: 300,  // 邮件检查超时(秒) - 5分钟足够接收验证码
+  emailCheckInterval: 5,  // 邮件检查间隔(秒) - 5秒平衡速度和请求频率
+  registerDelay: 2000,  // 注册间隔(毫秒) - 2秒更稳定，降低被封风险
+  retryTimes: 3,  // 重试次数 - 3次重试合理
+  concurrency: 15,  // 最大并发数 (1-100) - 15个并发平衡速度和稳定性
+  httpTimeout: 30,  // HTTP请求超时(秒)
+  batchSaveSize: 10,  // 批量保存大小 - 每10个账号批量写入KV
+  connectionPoolSize: 100,  // 连接池大小（预留配置）
+  skipApikeyOnRegister: false,  // 快速模式：注册时跳过APIKEY获取，稍后批量获取
+  enableNotification: false,  // 通知默认关闭
   pushplusToken: "",  // PushPlus Token
 };
 
@@ -842,6 +842,37 @@ async function registerAccount(): Promise<RegisterResult> {
 
     broadcast({ type: 'log', level: 'success', message: `  ✓ 获得Token` });
 
+    // 快速模式：跳过APIKEY获取，稍后批量获取
+    if (registerConfig.skipApikeyOnRegister) {
+      const account = { email, password, token: userToken, apikey: null, createdAt: new Date().toISOString() };
+      const saved = await saveAccount(email, password, userToken);
+
+      stats.success++;
+
+      if (saved) {
+        broadcast({
+          type: 'log',
+          level: 'success',
+          message: `✅ 快速完成:${email}(稍后获取KEY)`,
+          stats: { success: stats.success, failed: stats.failed, total: stats.success + stats.failed },
+          link: { text: '邮箱', url: emailCheckUrl }
+        });
+        broadcast({ type: 'account_added', account });
+      } else {
+        broadcast({
+          type: 'log',
+          level: 'warning',
+          message: `⚠️ 完成:${email}(本地,稍后获取KEY)`,
+          stats: { success: stats.success, failed: stats.failed, total: stats.success + stats.failed },
+          link: { text: '邮箱', url: emailCheckUrl }
+        });
+        broadcast({ type: 'local_account_added', account });
+      }
+
+      return { success: true, account };
+    }
+
+    // 正常模式：立即获取APIKEY
     // 6. API登录
     broadcast({ type: 'log', level: 'info', message: `  → 登录API...` });
     const accessToken = await loginToApi(userToken);
@@ -1486,41 +1517,41 @@ const HTML_PAGE = `<!DOCTYPE html>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">邮件等待超时 (秒)</label>
-                        <input type="number" id="emailTimeout" value="120" min="30" max="300"
+                        <input type="number" id="emailTimeout" value="300" min="60" max="600"
                             class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring focus:ring-indigo-200 transition">
+                        <p class="text-xs text-gray-500 mt-1">建议：300秒（5分钟），最多10分钟</p>
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">账号间隔 (毫秒)</label>
                         <input type="number" id="registerDelay" value="2000" min="500" max="10000" step="500"
                             class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring focus:ring-indigo-200 transition">
+                        <p class="text-xs text-gray-500 mt-1">建议：2000ms（2秒），更稳定</p>
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">邮件轮询间隔（秒）</label>
-                        <input type="number" id="emailCheckInterval" value="1" min="0.5" max="10" step="0.5"
+                        <input type="number" id="emailCheckInterval" value="5" min="1" max="30" step="1"
                             class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring focus:ring-indigo-200 transition">
-                        <p class="text-xs text-gray-500 mt-1">建议：0.5-2秒，过小可能触发限流</p>
+                        <p class="text-xs text-gray-500 mt-1">建议：3-10秒，过小可能触发限流</p>
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">并发数</label>
-                        <input type="number" id="concurrency" value="1" min="1" max="10"
+                        <input type="number" id="concurrency" value="15" min="1" max="100"
                             class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring focus:ring-indigo-200 transition">
-                        <p class="text-xs text-gray-500 mt-1">同时注册的账号数量，建议3-5</p>
+                        <p class="text-xs text-gray-500 mt-1">建议：10-30，过高可能被封</p>
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">API 重试次数</label>
                         <input type="number" id="retryTimes" value="3" min="1" max="10"
                             class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring focus:ring-indigo-200 transition">
                     </div>
+                    <div class="flex items-center">
+                        <input type="checkbox" id="skipApikeyOnRegister" class="w-5 h-5 text-indigo-600 rounded">
+                        <label class="ml-3 text-sm font-medium text-gray-700">🚀 快速模式（注册后稍后批量获取APIKEY）</label>
+                    </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">PushPlus Token</label>
                         <input type="text" id="pushplusToken" value="" placeholder="留空则不发送通知"
                             class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring focus:ring-indigo-200 transition">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-2">目标注册账户数</label>
-                        <input type="number" id="targetAccounts" value="1000000" min="1" max="10000000"
-                            class="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring focus:ring-indigo-200 transition">
-                        <p class="text-xs text-gray-500 mt-1">默认100万</p>
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">HTTP超时 (秒)</label>
@@ -1556,10 +1587,14 @@ const HTML_PAGE = `<!DOCTYPE html>
             </div>
 
             <div class="flex flex-col sm:flex-row gap-3 sm:gap-4 mb-4">
-                <input type="number" id="registerCount" value="5" min="1" max="100"
-                    class="flex-1 px-4 py-3 text-base border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring focus:ring-indigo-200 transition">
+                <div class="flex-1">
+                    <label for="registerCount" class="block text-sm font-medium text-gray-700 mb-2">注册数量</label>
+                    <input type="number" id="registerCount" value="5" min="1" max="1000"
+                        placeholder="输入要注册的账号数量"
+                        class="w-full px-4 py-3 text-base border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring focus:ring-indigo-200 transition">
+                </div>
                 <button id="startRegisterBtn"
-                    class="w-full sm:w-auto px-6 sm:px-8 py-3 bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-semibold rounded-lg shadow-lg hover:shadow-xl hover:-translate-y-0.5 transition-all disabled:opacity-60 disabled:cursor-not-allowed text-base">
+                    class="w-full sm:w-auto px-6 sm:px-8 py-3 bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-semibold rounded-lg shadow-lg hover:shadow-xl hover:-translate-y-0.5 transition-all disabled:opacity-60 disabled:cursor-not-allowed text-base self-end">
                     开始注册
                 </button>
                 <button id="stopRegisterBtn" style="display: none;"
@@ -1841,10 +1876,10 @@ const HTML_PAGE = `<!DOCTYPE html>
         let totalTaskCount = 0;
         let filterMode = 'all'; // 'all', 'local', 'with-apikey', 'without-apikey'
 
-        // 前端配置缓存
+        // 前端配置缓存（与后端默认值保持一致）
         let clientConfig = {
-            concurrency: 10,
-            registerDelay: 1000
+            concurrency: 15,
+            registerDelay: 2000
         };
 
         const $statusBadge = $('#statusBadge');
@@ -2479,15 +2514,15 @@ const HTML_PAGE = `<!DOCTYPE html>
                 const config = await response.json();
 
                 // 更新前端配置缓存
-                clientConfig.concurrency = config.concurrency || 10;
-                clientConfig.registerDelay = config.registerDelay || 1000;
+                clientConfig.concurrency = config.concurrency || 15;
+                clientConfig.registerDelay = config.registerDelay || 2000;
 
-                $('#emailTimeout').val(config.emailTimeout);
-                $('#emailCheckInterval').val(config.emailCheckInterval || 6);
-                $('#registerDelay').val(config.registerDelay);
-                $('#retryTimes').val(config.retryTimes);
-                $('#concurrency').val(config.concurrency || 50);
-                $('#targetAccounts').val(config.targetAccounts || 1000000);
+                $('#emailTimeout').val(config.emailTimeout || 300);
+                $('#emailCheckInterval').val(config.emailCheckInterval || 5);
+                $('#registerDelay').val(config.registerDelay || 2000);
+                $('#retryTimes').val(config.retryTimes || 3);
+                $('#concurrency').val(config.concurrency || 15);
+                $('#skipApikeyOnRegister').prop('checked', config.skipApikeyOnRegister || false);
                 $('#httpTimeout').val(config.httpTimeout || 30);
                 $('#batchSaveSize').val(config.batchSaveSize || 10);
                 $('#connectionPoolSize').val(config.connectionPoolSize || 100);
@@ -2557,7 +2592,7 @@ const HTML_PAGE = `<!DOCTYPE html>
                     registerDelay: parseInt($('#registerDelay').val()),
                     retryTimes: parseInt($('#retryTimes').val()),
                     concurrency: parseInt($('#concurrency').val()),
-                    targetAccounts: parseInt($('#targetAccounts').val()),
+                    skipApikeyOnRegister: $('#skipApikeyOnRegister').is(':checked'),
                     httpTimeout: parseInt($('#httpTimeout').val()),
                     batchSaveSize: parseInt($('#batchSaveSize').val()),
                     connectionPoolSize: parseInt($('#connectionPoolSize').val()),
