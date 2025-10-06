@@ -63,20 +63,20 @@ async function kvGet(key: Deno.KvKey) {
   resetDailyStats();
   kvStats.reads++;
   kvStats.dailyReads++;
-  return await kvGet(key);
+  return await kv.get(key);
 }
 
 async function kvSet(key: Deno.KvKey, value: any, options?: { expireIn?: number }) {
   resetDailyStats();
   kvStats.writes++;
   kvStats.dailyWrites++;
-  return await kvSet(key, value, options);
+  return await kv.set(key, value, options);
 }
 
 async function kvDelete(key: Deno.KvKey) {
   resetDailyStats();
   kvStats.deletes++;
-  return await kvDelete(key);
+  return await kv.delete(key);
 }
 
 // 初始化KV
