@@ -32,6 +32,53 @@ const DOMAINS = [
 // KV数据库
 let kv: Deno.Kv;
 
+// 配置缓存（内存）
+let configCache: any = null;
+let configCacheTime = 0;
+const CONFIG_CACHE_TTL = 60000; // 配置缓存60秒
+
+// KV使用统计
+const kvStats = {
+  reads: 0,
+  writes: 0,
+  deletes: 0,
+  startTime: Date.now(),
+  dailyReads: 0,
+  dailyWrites: 0,
+  lastResetDate: new Date().toDateString()
+};
+
+// 重置每日统计
+function resetDailyStats() {
+  const today = new Date().toDateString();
+  if (kvStats.lastResetDate !== today) {
+    kvStats.dailyReads = 0;
+    kvStats.dailyWrites = 0;
+    kvStats.lastResetDate = today;
+  }
+}
+
+// 包装KV操作以统计
+async function kvGet(key: Deno.KvKey) {
+  resetDailyStats();
+  kvStats.reads++;
+  kvStats.dailyReads++;
+  return await kvGet(key);
+}
+
+async function kvSet(key: Deno.KvKey, value: any, options?: { expireIn?: number }) {
+  resetDailyStats();
+  kvStats.writes++;
+  kvStats.dailyWrites++;
+  return await kvSet(key, value, options);
+}
+
+async function kvDelete(key: Deno.KvKey) {
+  resetDailyStats();
+  kvStats.deletes++;
+  return await kvDelete(key);
+}
+
 // 初始化KV
 async function initKV() {
   try {
@@ -74,9 +121,9 @@ async function saveLogs(): Promise<void> {
       .slice(-200);
 
     if (recentLogs.length > 0) {
-      await kv.set(logKey, recentLogs, { expireIn: 3600000 });  // 1小时过期
+      await kvSet(logKey, recentLogs, { expireIn: 3600000 });  // 1小时过期
     } else {
-      await kv.delete(logKey);
+      await kvDelete(logKey);
     }
   } catch (error) {
     console.error("保存日志失败:", error);
@@ -209,6 +256,160 @@ let registerConfig = {
   pushplusToken: "",  // PushPlus Token
 };
 
+// 从KV加载配置（带缓存）
+async function loadConfigFromKV() {
+  const now = Date.now();
+
+  // 如果缓存有效，直接返回
+  if (configCache && (now - configCacheTime) < CONFIG_CACHE_TTL) {
+    return configCache;
+  }
+
+  // 从KV读取
+  const configKey = ["config", "register"];
+  const entry = await kvGet(configKey);
+
+  if (entry.value) {
+    configCache = entry.value;
+    configCacheTime = now;
+    // 更新全局registerConfig
+    registerConfig = { ...registerConfig, ...entry.value };
+    return entry.value;
+  }
+
+  // 如果KV中没有，返回默认配置
+  configCache = registerConfig;
+  configCacheTime = now;
+  return registerConfig;
+}
+
+// 保存配置并更新缓存
+async function saveConfigToKV(config: any) {
+  const configKey = ["config", "register"];
+  await kvSet(configKey, config);
+  // 更新缓存
+  configCache = config;
+  configCacheTime = Date.now();
+  // 更新全局registerConfig
+  registerConfig = { ...registerConfig, ...config };
+}
+
+// 批量保存账号（使用atomic）
+async function batchSaveAccounts(accounts: Array<{ email: string; password: string; token: string; apikey?: string; createdAt?: string; status?: string }>) {
+  if (accounts.length === 0) return { success: 0, failed: 0 };
+
+  const BATCH_SIZE = 10; // 每批最多10个（Deno KV atomic限制）
+  let success = 0;
+  let failed = 0;
+
+  // 分批处理
+  for (let i = 0; i < accounts.length; i += BATCH_SIZE) {
+    const batch = accounts.slice(i, i + BATCH_SIZE);
+
+    try {
+      const atomic = kv.atomic();
+
+      for (const acc of batch) {
+        const timestamp = Date.now();
+        const key = ["zai_accounts", timestamp, acc.email];
+        atomic.set(key, {
+          email: acc.email,
+          password: acc.password,
+          token: acc.token,
+          apikey: acc.apikey || null,
+          status: acc.status || 'active',
+          createdAt: acc.createdAt || new Date().toISOString()
+        });
+      }
+
+      await atomic.commit();
+
+      // 统计写入次数（atomic算一次写入）
+      kvStats.writes++;
+      kvStats.dailyWrites++;
+      resetDailyStats();
+
+      success += batch.length;
+    } catch (error) {
+      console.error("批量保存失败:", error);
+      failed += batch.length;
+
+      // 如果批量失败，尝试单个保存
+      for (const acc of batch) {
+        try {
+          const timestamp = Date.now();
+          const key = ["zai_accounts", timestamp, acc.email];
+          await kvSet(key, {
+            email: acc.email,
+            password: acc.password,
+            token: acc.token,
+            apikey: acc.apikey || null,
+            status: acc.status || 'active',
+            createdAt: acc.createdAt || new Date().toISOString()
+          });
+          success++;
+          failed--;
+        } catch (e) {
+          console.error(`单个保存失败 ${acc.email}:`, e);
+        }
+      }
+    }
+  }
+
+  return { success, failed };
+}
+
+// 内存去重缓存
+let emailCacheSet: Set<string> | null = null;
+let emailCacheTime = 0;
+const EMAIL_CACHE_TTL = 300000; // 邮箱缓存5分钟
+
+// 加载所有邮箱到内存（用于快速去重）
+async function loadEmailCache(): Promise<Set<string>> {
+  const now = Date.now();
+
+  // 如果缓存有效，直接返回
+  if (emailCacheSet && (now - emailCacheTime) < EMAIL_CACHE_TTL) {
+    return emailCacheSet;
+  }
+
+  // 重新加载
+  const emails = new Set<string>();
+  const entries = kv.list({ prefix: ["zai_accounts"] });
+
+  for await (const entry of entries) {
+    const account = entry.value as any;
+    if (account?.email) {
+      emails.add(account.email);
+    }
+  }
+
+  emailCacheSet = emails;
+  emailCacheTime = now;
+
+  // 这次list操作计为一次读取
+  kvStats.reads++;
+  kvStats.dailyReads++;
+  resetDailyStats();
+
+  return emails;
+}
+
+// 清除邮箱缓存（在添加/删除账号后调用）
+function invalidateEmailCache() {
+  emailCacheSet = null;
+  emailCacheTime = 0;
+}
+
+// 快速检查邮箱是否存在
+async function isEmailExists(email: string): Promise<boolean> {
+  const cache = await loadEmailCache();
+  return cache.has(email);
+}
+
+
+
+
 // ==================== 鉴权相关 ====================
 
 // 检查请求认证
@@ -220,7 +421,7 @@ async function checkAuth(req: Request): Promise<{ authenticated: boolean; sessio
     const sessionId = sessionMatch[1];
     // KV检查session
     const sessionKey = ["sessions", sessionId];
-    const session = await kv.get(sessionKey);
+    const session = await kvGet(sessionKey);
 
     if (session.value) {
       return { authenticated: true, sessionId };
@@ -468,7 +669,7 @@ async function saveAccount(email: string, password: string, token: string, apike
   try {
     const timestamp = Date.now();
     const key = ["zai_accounts", timestamp, email];
-    await kv.set(key, {
+    await kvSet(key, {
       email,
       password,
       token,
@@ -476,6 +677,8 @@ async function saveAccount(email: string, password: string, token: string, apike
       status: status,
       createdAt: new Date().toISOString()
     });
+    // 清除邮箱缓存
+    invalidateEmailCache();
     return true;
   } catch (error) {
     console.error("❌ KV保存失败:", error);
@@ -1363,6 +1566,45 @@ const HTML_PAGE = `<!DOCTYPE html>
                     <div class="text-2xl sm:text-3xl font-bold" id="timeValue">0s</div>
                 </div>
             </div>
+
+            <!-- KV统计信息（可折叠） -->
+            <div class="mt-4 border-t border-gray-200 pt-4">
+                <button id="kvStatsToggle" class="text-sm text-gray-600 hover:text-gray-800 font-medium flex items-center gap-2">
+                    <span>📊 KV存储统计</span>
+                    <span id="kvStatsToggleIcon">▼</span>
+                </button>
+                <div id="kvStatsPanel" class="hidden mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
+                    <div class="bg-gray-50 rounded-lg p-3 border border-gray-200">
+                        <div class="text-xs text-gray-600 mb-1">今日写入</div>
+                        <div class="text-lg font-bold text-gray-800">
+                            <span id="kvDailyWrites">0</span>
+                            <span class="text-xs text-gray-500">/ 10k</span>
+                        </div>
+                        <div class="text-xs text-gray-500" id="kvWritesPercent">0%</div>
+                    </div>
+                    <div class="bg-gray-50 rounded-lg p-3 border border-gray-200">
+                        <div class="text-xs text-gray-600 mb-1">今日读取</div>
+                        <div class="text-lg font-bold text-gray-800">
+                            <span id="kvDailyReads">0</span>
+                            <span class="text-xs text-gray-500">/ 1M</span>
+                        </div>
+                        <div class="text-xs text-gray-500" id="kvReadsPercent">0%</div>
+                    </div>
+                    <div class="bg-gray-50 rounded-lg p-3 border border-gray-200">
+                        <div class="text-xs text-gray-600 mb-1">本次会话</div>
+                        <div class="text-lg font-bold text-gray-800">
+                            <span id="kvSessionWrites">0</span>写
+                            <span class="mx-1">/</span>
+                            <span id="kvSessionReads">0</span>读
+                        </div>
+                        <div class="text-xs text-gray-500" id="kvUptime">运行中</div>
+                    </div>
+                    <div class="bg-gray-50 rounded-lg p-3 border border-gray-200">
+                        <div class="text-xs text-gray-600 mb-1">状态</div>
+                        <div id="kvWarnings" class="text-xs text-gray-600">正常</div>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- 账号列表 -->
@@ -1870,6 +2112,47 @@ const HTML_PAGE = `<!DOCTYPE html>
             // 加载并合并本地账号
             await loadLocalAccounts();
         }
+
+        // 加载KV统计
+        async function loadKVStats() {
+            try {
+                const response = await fetch('/api/kv-stats');
+                const stats = await response.json();
+
+                // 更新UI
+                $('#kvDailyWrites').text(stats.daily.writes);
+                $('#kvDailyReads').text(stats.daily.reads);
+                $('#kvWritesPercent').text(stats.quota.writesPercent);
+                $('#kvReadsPercent').text(stats.quota.readsPercent);
+                $('#kvSessionWrites').text(stats.session.writes);
+                $('#kvSessionReads').text(stats.session.reads);
+                $('#kvUptime').text(stats.session.uptime);
+
+                // 显示警告
+                if (stats.warnings && stats.warnings.length > 0) {
+                    $('#kvWarnings').html(stats.warnings.join('<br>')).addClass('text-orange-600 font-medium');
+                } else {
+                    $('#kvWarnings').text('✓ 正常').removeClass('text-orange-600 font-medium');
+                }
+            } catch (error) {
+                console.error('加载KV统计失败:', error);
+            }
+        }
+
+        // KV统计折叠/展开
+        $('#kvStatsToggle').on('click', function() {
+            const panel = $('#kvStatsPanel');
+            const icon = $('#kvStatsToggleIcon');
+            if (panel.hasClass('hidden')) {
+                panel.removeClass('hidden');
+                icon.text('▲');
+                loadKVStats(); // 展开时加载
+            } else {
+                panel.addClass('hidden');
+                icon.text('▼');
+            }
+        });
+
 
         $searchInput.on('input', function() {
             const keyword = $(this).val().toLowerCase();
@@ -2915,7 +3198,7 @@ async function handler(req: Request): Promise<Response> {
       // 保存 session 到 KV，设置 24 小时过期
       const sessionKey = ["sessions", sessionId];
       try {
-        await kv.set(sessionKey, { createdAt: Date.now() }, { expireIn: 86400000 }); // 24小时过期
+        await kvSet(sessionKey, { createdAt: Date.now() }, { expireIn: 86400000 }); // 24小时过期
       } catch (error) {
         console.error("❌ Failed to save session to KV:", error);
 
@@ -2991,7 +3274,7 @@ async function handler(req: Request): Promise<Response> {
     if (auth.sessionId) {
       // 从 KV 删除 session
       const sessionKey = ["sessions", auth.sessionId];
-      await kv.delete(sessionKey);
+      await kvDelete(sessionKey);
     }
     return new Response(JSON.stringify({ success: true }), {
       headers: { "Content-Type": "application/json" }
@@ -3005,11 +3288,8 @@ async function handler(req: Request): Promise<Response> {
 
   // 获取配置
   if (url.pathname === "/api/config" && req.method === "GET") {
-    // 从 KV 读取配置，如果不存在则返回默认值
-    const configKey = ["config", "register"];
-    const savedConfig = await kv.get(configKey);
-
-    const config = savedConfig.value || registerConfig;
+    // 使用缓存加载配置
+    const config = await loadConfigFromKV();
     return new Response(JSON.stringify(config), {
       headers: { "Content-Type": "application/json" }
     });
@@ -3018,16 +3298,66 @@ async function handler(req: Request): Promise<Response> {
   // 保存配置
   if (url.pathname === "/api/config" && req.method === "POST") {
     const body = await req.json();
-    registerConfig = { ...registerConfig, ...body };
 
-    // 保存到 KV 持久化
-    const configKey = ["config", "register"];
-    await kv.set(configKey, registerConfig);
+    // 使用缓存保存函数
+    await saveConfigToKV(body);
 
     return new Response(JSON.stringify({ success: true }), {
       headers: { "Content-Type": "application/json" }
     });
   }
+
+  // KV统计信息
+  if (url.pathname === "/api/kv-stats" && req.method === "GET") {
+    resetDailyStats();
+
+    const uptime = Math.floor((Date.now() - kvStats.startTime) / 1000);
+    const uptimeStr = `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m ${uptime % 60}s`;
+
+    // Deno Deploy免费限制
+    const DAILY_WRITE_LIMIT = 10000;
+    const DAILY_READ_LIMIT = 1000000;
+
+    const stats = {
+      // 当前会话统计
+      session: {
+        reads: kvStats.reads,
+        writes: kvStats.writes,
+        deletes: kvStats.deletes,
+        uptime: uptimeStr
+      },
+      // 今日统计
+      daily: {
+        reads: kvStats.dailyReads,
+        writes: kvStats.dailyWrites,
+        date: kvStats.lastResetDate
+      },
+      // 配额使用率
+      quota: {
+        writesUsed: kvStats.dailyWrites,
+        writesLimit: DAILY_WRITE_LIMIT,
+        writesPercent: ((kvStats.dailyWrites / DAILY_WRITE_LIMIT) * 100).toFixed(2) + '%',
+        readsUsed: kvStats.dailyReads,
+        readsLimit: DAILY_READ_LIMIT,
+        readsPercent: ((kvStats.dailyReads / DAILY_READ_LIMIT) * 100).toFixed(2) + '%'
+      },
+      // 警告
+      warnings: []
+    };
+
+    // 添加警告
+    if (kvStats.dailyWrites > DAILY_WRITE_LIMIT * 0.8) {
+      stats.warnings.push('⚠️ 写入配额已使用超过80%');
+    }
+    if (kvStats.dailyReads > DAILY_READ_LIMIT * 0.8) {
+      stats.warnings.push('⚠️ 读取配额已使用超过80%');
+    }
+
+    return new Response(JSON.stringify(stats), {
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+
 
   // SSE
   if (url.pathname === "/events") {
@@ -3123,7 +3453,7 @@ async function handler(req: Request): Promise<Response> {
       const timestamp = Date.now();
       const key = ["zai_accounts", timestamp, email];
       try {
-        await kv.set(key, {
+        await kvSet(key, {
           email,
           password,
           token,
@@ -3200,7 +3530,7 @@ async function handler(req: Request): Promise<Response> {
         // 使用不同的时间戳避免键冲突
         const key = ["zai_accounts", timestamp + index, email];
         try {
-          await kv.set(key, {
+          await kvSet(key, {
             email,
             password,
             token,
@@ -3291,7 +3621,7 @@ async function handler(req: Request): Promise<Response> {
         // 使用不同的时间戳避免键冲突
         const key = ["zai_accounts", timestamp + index, email];
         try {
-          await kv.set(key, {
+          await kvSet(key, {
             email,
             password,
             token,
@@ -3435,7 +3765,7 @@ async function handler(req: Request): Promise<Response> {
       for await (const entry of entries) {
         const account = entry.value as any;
         if (account.email === email) {
-          await kv.set(entry.key, {
+          await kvSet(entry.key, {
             ...account,
             apikey: apikey
           });
@@ -3487,7 +3817,7 @@ async function handler(req: Request): Promise<Response> {
           const newStatus = isActive ? 'active' : 'inactive';
 
           // 更新账号状态
-          await kv.set(entry.key, {
+          await kvSet(entry.key, {
             ...account,
             status: newStatus
           });
@@ -3527,7 +3857,7 @@ async function handler(req: Request): Promise<Response> {
       for await (const entry of entries) {
         const account = entry.value as any;
         if (account.status === 'inactive') {
-          await kv.delete(entry.key);
+          await kvDelete(entry.key);
           deletedCount++;
         }
       }
@@ -3560,7 +3890,7 @@ await initKV();
 (async () => {
   // 加载配置
   const configKey = ["config", "register"];
-  const savedConfig = await kv.get(configKey);
+  const savedConfig = await kvGet(configKey);
   if (savedConfig.value) {
     registerConfig = { ...registerConfig, ...savedConfig.value };
     console.log("✓ 已加载保存的配置");
@@ -3569,7 +3899,7 @@ await initKV();
   // 清理历史日志（重启时清空）
   const logKey = ["logs", "recent"];
   try {
-    await kv.delete(logKey);
+    await kvDelete(logKey);
     console.log("✓ 已清理历史日志数据");
   } catch (error) {
     console.log("⚠️ 清理日志失败:", error);
