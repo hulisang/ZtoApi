@@ -1073,6 +1073,14 @@ const HTML_PAGE = `<!DOCTYPE html>
             box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.5), 0 10px 25px -5px rgba(0, 0, 0, 0.3);
         }
 
+        /* 快速筛选按钮激活状态 */
+        .quick-filter-btn.active {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            font-weight: 600;
+        }
+
+
         /* PC端优化 */
         @media (min-width: 769px) {
             /* 表格悬停效果 */
@@ -1360,9 +1368,12 @@ const HTML_PAGE = `<!DOCTYPE html>
         <!-- 账号列表 -->
         <div class="bg-white rounded-2xl shadow-2xl p-3 sm:p-6 mb-4 sm:mb-6">
             <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-4">
-                <h2 class="text-xl sm:text-2xl font-bold text-gray-800">账号列表</h2>
+                <div class="flex items-center gap-3">
+                    <h2 class="text-xl sm:text-2xl font-bold text-gray-800">账号列表</h2>
+                    <span id="selectedCount" class="hidden px-3 py-1 bg-indigo-100 text-indigo-700 rounded-full text-sm font-semibold">已选 0 项</span>
+                </div>
                 <div class="flex flex-wrap gap-2 w-full sm:w-auto">
-                    <input type="text" id="searchInput" placeholder="搜索邮箱..."
+                    <input type="text" id="searchInput" placeholder="搜索邮箱/密码/Token/APIKEY..."
                         class="flex-1 sm:flex-none px-3 sm:px-4 py-2 text-sm sm:text-base border-2 border-gray-200 rounded-lg focus:border-indigo-500 focus:ring focus:ring-indigo-200 transition">
 
                     <!-- 服务端操作 -->
@@ -1414,10 +1425,60 @@ const HTML_PAGE = `<!DOCTYPE html>
                     </button>
                 </div>
             </div>
+
+            <!-- 快速筛选标签 -->
+            <div class="flex flex-wrap gap-2 mb-4">
+                <span class="text-sm text-gray-600 font-medium self-center">快速筛选:</span>
+                <button class="quick-filter-btn px-3 py-1 text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-full transition" data-filter="today">
+                    📅 今日注册
+                </button>
+                <button class="quick-filter-btn px-3 py-1 text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-full transition" data-filter="week">
+                    📆 本周注册
+                </button>
+                <button class="quick-filter-btn px-3 py-1 text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-full transition" data-filter="inactive">
+                    ⚠️ 失效账号
+                </button>
+                <button class="quick-filter-btn px-3 py-1 text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-full transition" data-filter="no-apikey">
+                    🔒 无APIKEY
+                </button>
+                <button class="quick-filter-btn px-3 py-1 text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-full transition" data-filter="has-apikey">
+                    🔑 有APIKEY
+                </button>
+                <button id="clearFilterBtn" class="px-3 py-1 text-xs bg-red-100 hover:bg-red-200 text-red-700 rounded-full transition hidden">
+                    ✖ 清除筛选
+                </button>
+            </div>
+
+            <!-- 批量操作按钮区域 -->
+            <div id="batchActionsBar" class="hidden mb-4 p-3 bg-indigo-50 rounded-lg border-2 border-indigo-200">
+                <div class="flex flex-wrap gap-2">
+                    <button id="batchDeleteBtn" class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white font-semibold rounded-lg transition text-sm">
+                        🗑️ 批量删除
+                    </button>
+                    <button id="batchExportCsvBtn" class="px-4 py-2 bg-green-500 hover:bg-green-600 text-white font-semibold rounded-lg transition text-sm">
+                        📊 导出CSV
+                    </button>
+                    <button id="batchExportJsonBtn" class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-lg transition text-sm">
+                        📦 导出JSON
+                    </button>
+                    <button id="batchCopyEmailsBtn" class="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white font-semibold rounded-lg transition text-sm">
+                        📋 复制邮箱
+                    </button>
+                    <button id="batchCopyTokensBtn" class="px-4 py-2 bg-indigo-500 hover:bg-indigo-600 text-white font-semibold rounded-lg transition text-sm">
+                        🔑 复制Token
+                    </button>
+                    <button id="cancelSelectionBtn" class="ml-auto px-4 py-2 bg-gray-400 hover:bg-gray-500 text-white font-semibold rounded-lg transition text-sm">
+                        ✖️ 取消选择
+                    </button>
+                </div>
+            </div>
             <div class="overflow-x-auto mobile-scroll">
                 <table class="w-full min-w-[640px]">
                     <thead>
                         <tr class="bg-gray-50 text-left">
+                            <th class="px-2 sm:px-4 py-2 sm:py-3 text-xs sm:text-sm font-semibold text-gray-700">
+                                <input type="checkbox" id="selectAllCheckbox" class="w-4 h-4 text-indigo-600 rounded cursor-pointer">
+                            </th>
                             <th class="px-2 sm:px-4 py-2 sm:py-3 text-xs sm:text-sm font-semibold text-gray-700">序号</th>
                             <th class="px-2 sm:px-4 py-2 sm:py-3 text-xs sm:text-sm font-semibold text-gray-700">邮箱</th>
                             <th class="px-2 sm:px-4 py-2 sm:py-3 text-xs sm:text-sm font-semibold text-gray-700 hide-mobile">密码</th>
@@ -1476,6 +1537,8 @@ const HTML_PAGE = `<!DOCTYPE html>
     <script>
         let accounts = [];
         let filteredAccounts = [];
+        let selectedEmails = new Set(); // 存储选中的账号邮箱
+        let quickFilterMode = null; // 快速筛选模式
         let isRunning = false;
         let currentPage = 1;
         let pageSize = 20;
@@ -1612,10 +1675,11 @@ const HTML_PAGE = `<!DOCTYPE html>
             const pageData = displayData.slice(startIndex, endIndex);
 
             if (pageData.length === 0) {
-                $accountTableBody.html('<tr><td colspan="8" class="px-4 py-8 text-center text-gray-400">暂无数据</td></tr>');
+                $accountTableBody.html('<tr><td colspan="9" class="px-4 py-8 text-center text-gray-400">暂无数据</td></tr>');
             } else {
                 const rows = pageData.map((acc, idx) => {
                     const rowId = 'row-' + (startIndex + idx);
+                    const accountEmail = acc.email;
                     // 处理APIKEY显示
                     const apikeyDisplay = acc.apikey ?
                         '<code class="bg-indigo-50 text-indigo-700 px-2 py-1 rounded text-xs font-mono">' + acc.apikey.substring(0, 20) + '...</code>' :
@@ -1628,6 +1692,7 @@ const HTML_PAGE = `<!DOCTYPE html>
                         '<span class="px-2 py-1 bg-red-100 text-red-700 rounded-full text-xs font-medium">✗ 失效</span>';
 
                     return '<tr class="group" id="' + rowId + '">' +
+                        '<td class="px-2 sm:px-4 py-2 sm:py-3"><input type="checkbox" class="row-checkbox w-4 h-4 text-indigo-600 rounded cursor-pointer" data-email="' + accountEmail + '"></td>' +
                         '<td class="px-2 sm:px-4 py-2 sm:py-3 text-xs sm:text-sm text-gray-700 font-medium">' + (startIndex + idx + 1) + '</td>' +
                         '<td class="px-2 sm:px-4 py-2 sm:py-3 text-xs sm:text-sm text-gray-700 truncate max-w-[200px] clickable-cell" title="点击复制: ' + acc.email + '" data-copy="' + acc.email + '">' + acc.email + '</td>' +
                         '<td class="px-2 sm:px-4 py-2 sm:py-3 text-xs sm:text-sm text-gray-700 hide-mobile clickable-cell" title="点击复制密码" data-copy="' + acc.password + '"><code class="bg-blue-50 text-blue-700 px-2 py-1 rounded text-xs font-mono">' + acc.password + '</code></td>' +
@@ -1694,6 +1759,20 @@ const HTML_PAGE = `<!DOCTYPE html>
             // 更新分页控件
             updatePagination(displayData.length, totalPages);
 
+            // 恢复复选框状态
+            $('.row-checkbox').each(function() {
+                const email = $(this).data('email');
+                if (selectedEmails.has(email)) {
+                    $(this).prop('checked', true);
+                }
+            });
+
+            // 更新全选复选框状态
+            updateSelectAllCheckbox();
+
+            // 更新选中计数
+            updateSelectionUI();
+
             // 控制本地操作按钮的显示
             if (filterMode === 'local') {
                 $('.local-operation-btn').show();
@@ -1746,6 +1825,41 @@ const HTML_PAGE = `<!DOCTYPE html>
             container.append($btn);
         }
 
+        // 更新全选复选框状态
+        function updateSelectAllCheckbox() {
+            const visibleCheckboxes = $('.row-checkbox');
+            if (visibleCheckboxes.length === 0) {
+                $('#selectAllCheckbox').prop('checked', false).prop('indeterminate', false);
+                return;
+            }
+            const checkedCount = visibleCheckboxes.filter(':checked').length;
+            if (checkedCount === 0) {
+                $('#selectAllCheckbox').prop('checked', false).prop('indeterminate', false);
+            } else if (checkedCount === visibleCheckboxes.length) {
+                $('#selectAllCheckbox').prop('checked', true).prop('indeterminate', false);
+            } else {
+                $('#selectAllCheckbox').prop('checked', false).prop('indeterminate', true);
+            }
+        }
+
+        // 更新选择状态UI
+        function updateSelectionUI() {
+            const count = selectedEmails.size;
+            if (count > 0) {
+                $('#selectedCount').removeClass('hidden').text('已选 ' + count + ' 项');
+                $('#batchActionsBar').removeClass('hidden');
+            } else {
+                $('#selectedCount').addClass('hidden');
+                $('#batchActionsBar').addClass('hidden');
+            }
+        }
+
+        // 获取选中的完整账号对象
+        function getSelectedAccounts() {
+            return accounts.filter(acc => selectedEmails.has(acc.email));
+        }
+
+
         async function loadAccounts() {
             const response = await fetch('/api/accounts');
             accounts = await response.json();
@@ -1759,10 +1873,52 @@ const HTML_PAGE = `<!DOCTYPE html>
 
         $searchInput.on('input', function() {
             const keyword = $(this).val().toLowerCase();
-            filteredAccounts = accounts.filter(acc => acc.email.toLowerCase().includes(keyword));
+            applyFilters(keyword);
+        });
+
+        // 应用筛选（搜索+快速筛选）
+        function applyFilters(searchKeyword = '') {
+            let result = accounts;
+
+            // 应用快速筛选
+            if (quickFilterMode) {
+                const now = new Date();
+                const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+                const weekStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay());
+
+                switch (quickFilterMode) {
+                    case 'today':
+                        result = result.filter(acc => new Date(acc.createdAt) >= todayStart);
+                        break;
+                    case 'week':
+                        result = result.filter(acc => new Date(acc.createdAt) >= weekStart);
+                        break;
+                    case 'inactive':
+                        result = result.filter(acc => acc.status === 'inactive');
+                        break;
+                    case 'no-apikey':
+                        result = result.filter(acc => !acc.apikey);
+                        break;
+                    case 'has-apikey':
+                        result = result.filter(acc => acc.apikey);
+                        break;
+                }
+            }
+
+            // 应用搜索关键词
+            if (searchKeyword) {
+                result = result.filter(acc => {
+                    return acc.email.toLowerCase().includes(searchKeyword) ||
+                           acc.password.toLowerCase().includes(searchKeyword) ||
+                           acc.token.toLowerCase().includes(searchKeyword) ||
+                           (acc.apikey && acc.apikey.toLowerCase().includes(searchKeyword));
+                });
+            }
+
+            filteredAccounts = result;
             currentPage = 1;
             renderTable();
-        });
+        }
 
         // 分页按钮事件
         $('#firstPageBtn').on('click', () => { currentPage = 1; renderTable(); });
@@ -1774,6 +1930,174 @@ const HTML_PAGE = `<!DOCTYPE html>
             currentPage = 1;
             renderTable();
         });
+
+        // 全选复选框事件
+        $('#selectAllCheckbox').on('change', function() {
+            const isChecked = $(this).prop('checked');
+            $('.row-checkbox').each(function() {
+                const email = $(this).data('email');
+                if (isChecked) {
+                    selectedEmails.add(email);
+                    $(this).prop('checked', true);
+                } else {
+                    selectedEmails.delete(email);
+                    $(this).prop('checked', false);
+                }
+            });
+            updateSelectionUI();
+        });
+
+        // 单行复选框事件（使用事件委托）
+        $accountTableBody.on('change', '.row-checkbox', function() {
+            const email = $(this).data('email');
+            if ($(this).prop('checked')) {
+                selectedEmails.add(email);
+            } else {
+                selectedEmails.delete(email);
+            }
+            updateSelectAllCheckbox();
+            updateSelectionUI();
+        });
+
+        // 取消选择按钮
+        $('#cancelSelectionBtn').on('click', function() {
+            selectedEmails.clear();
+            $('.row-checkbox').prop('checked', false);
+            updateSelectAllCheckbox();
+            updateSelectionUI();
+        });
+
+        // 批量删除按钮
+        $('#batchDeleteBtn').on('click', async function() {
+            const selected = getSelectedAccounts();
+            if (selected.length === 0) {
+                showToast('请先选择要删除的账号', 'warning');
+                return;
+            }
+            if (!confirm('确定要删除选中的 ' + selected.length + ' 个账号吗？此操作不可撤销！')) {
+                return;
+            }
+
+            $(this).prop('disabled', true).text('删除中...');
+            let successCount = 0;
+
+            for (const acc of selected) {
+                try {
+                    const response = await fetch('/api/accounts/' + encodeURIComponent(acc.email), {
+                        method: 'DELETE'
+                    });
+                    if (response.ok) {
+                        successCount++;
+                        selectedEmails.delete(acc.email);
+                    }
+                } catch (error) {
+                    console.error('删除失败:', acc.email, error);
+                }
+            }
+
+            showToast('成功删除 ' + successCount + '/' + selected.length + ' 个账号', 'success');
+            $(this).prop('disabled', false).text('🗑️ 批量删除');
+            await loadAccounts();
+            renderTable();
+        });
+
+        // 批量导出CSV按钮
+        $('#batchExportCsvBtn').on('click', function() {
+            const selected = getSelectedAccounts();
+            if (selected.length === 0) {
+                showToast('请先选择要导出的账号', 'warning');
+                return;
+            }
+
+            let csv = 'Email,Password,Token,APIKEY,Created At,Status\\n';
+            selected.forEach(acc => {
+                csv += '"' + acc.email + '","' + acc.password + '","' + acc.token + '","' + (acc.apikey || '') + '","' + new Date(acc.createdAt).toLocaleString('zh-CN') + '","' + (acc.status || 'active') + '"\\n';
+            });
+
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = 'zai_accounts_' + new Date().toISOString().split('T')[0] + '.csv';
+            link.click();
+
+            showToast('已导出 ' + selected.length + ' 个账号到CSV', 'success');
+        });
+
+        // 批量导出JSON按钮
+        $('#batchExportJsonBtn').on('click', function() {
+            const selected = getSelectedAccounts();
+            if (selected.length === 0) {
+                showToast('请先选择要导出的账号', 'warning');
+                return;
+            }
+
+            const json = JSON.stringify(selected, null, 2);
+            const blob = new Blob([json], { type: 'application/json' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = 'zai_accounts_' + new Date().toISOString().split('T')[0] + '.json';
+            link.click();
+
+            showToast('已导出 ' + selected.length + ' 个账号到JSON', 'success');
+        });
+
+        // 批量复制邮箱按钮
+        $('#batchCopyEmailsBtn').on('click', function() {
+            const selected = getSelectedAccounts();
+            if (selected.length === 0) {
+                showToast('请先选择要复制的账号', 'warning');
+                return;
+            }
+
+            const emails = selected.map(acc => acc.email).join('\\n');
+            navigator.clipboard.writeText(emails);
+            showToast('已复制 ' + selected.length + ' 个邮箱地址', 'success');
+        });
+
+        // 批量复制Token按钮
+        $('#batchCopyTokensBtn').on('click', function() {
+            const selected = getSelectedAccounts();
+            if (selected.length === 0) {
+                showToast('请先选择要复制的账号', 'warning');
+                return;
+            }
+
+            const tokens = selected.map(acc => acc.token).join('\\n');
+            navigator.clipboard.writeText(tokens);
+            showToast('已复制 ' + selected.length + ' 个Token', 'success');
+        });
+
+        // 快速筛选按钮事件
+        $('.quick-filter-btn').on('click', function() {
+            const filter = $(this).data('filter');
+
+            if (quickFilterMode === filter) {
+                // 再次点击相同按钮，取消筛选
+                quickFilterMode = null;
+                $('.quick-filter-btn').removeClass('active');
+                $('#clearFilterBtn').addClass('hidden');
+            } else {
+                // 应用新筛选
+                quickFilterMode = filter;
+                $('.quick-filter-btn').removeClass('active');
+                $(this).addClass('active');
+                $('#clearFilterBtn').removeClass('hidden');
+            }
+
+            const searchKeyword = $searchInput.val().toLowerCase();
+            applyFilters(searchKeyword);
+        });
+
+        // 清除筛选按钮
+        $('#clearFilterBtn').on('click', function() {
+            quickFilterMode = null;
+            $searchInput.val('');
+            $('.quick-filter-btn').removeClass('active');
+            $(this).addClass('hidden');
+            applyFilters();
+        });
+
+
 
         async function loadSettings() {
             try {
