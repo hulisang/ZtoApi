@@ -2,11 +2,14 @@
   "tasks": {
     "start": "deno run --allow-net --allow-env --allow-read --unstable-kv main.ts",
     "dev": "deno run --allow-net --allow-env --allow-read --unstable-kv --watch main.ts",
+    "registry": "deno run --allow-net --allow-env --allow-read --unstable-kv zai_register.ts",
     "cache": "deno cache --reload main.ts"
   },
   "compilerOptions": {
     "strict": true,
-    "lib": ["deno.window"]
+    "lib": [
+      "deno.window"
+    ]
   },
   "fmt": {
     "useTabs": false,
@@ -18,7 +21,9 @@
   },
   "lint": {
     "rules": {
-      "tags": ["recommended"]
+      "tags": [
+        "recommended"
+      ]
     }
   }
 }

@@ -1306,6 +1306,14 @@ const HTML_PAGE = `<!DOCTYPE html>
                     <div class="text-xs sm:text-sm opacity-90 mb-1">本地账号</div>
                     <div class="text-2xl sm:text-3xl font-bold" id="localAccountsCount">0</div>
                 </div>
+                <div id="withApikeyCard" class="stat-card bg-gradient-to-br from-purple-400 to-violet-500 rounded-xl p-3 sm:p-4 text-center text-white cursor-pointer transform transition-all hover:scale-105 active:scale-95">
+                    <div class="text-xs sm:text-sm opacity-90 mb-1">有APIKEY</div>
+                    <div class="text-2xl sm:text-3xl font-bold" id="withApikeyCount">0</div>
+                </div>
+                <div id="withoutApikeyCard" class="stat-card bg-gradient-to-br from-orange-400 to-red-500 rounded-xl p-3 sm:p-4 text-center text-white cursor-pointer transform transition-all hover:scale-105 active:scale-95">
+                    <div class="text-xs sm:text-sm opacity-90 mb-1">无APIKEY</div>
+                    <div class="text-2xl sm:text-3xl font-bold" id="withoutApikeyCount">0</div>
+                </div>
                 <div class="bg-gradient-to-br from-blue-400 to-indigo-500 rounded-xl p-3 sm:p-4 text-center text-white">
                     <div class="text-xs sm:text-sm opacity-90 mb-1">本次成功</div>
                     <div class="text-2xl sm:text-3xl font-bold" id="successCount">0</div>
@@ -1445,7 +1453,7 @@ const HTML_PAGE = `<!DOCTYPE html>
         let pageSize = 20;
         let taskStartTime = 0;
         let totalTaskCount = 0;
-        let filterMode = 'all'; // 'all' 或 'local'
+        let filterMode = 'all'; // 'all', 'local', 'with-apikey', 'without-apikey'
 
         const $statusBadge = $('#statusBadge');
         const $startRegisterBtn = $('#startRegisterBtn');
@@ -1564,6 +1572,10 @@ const HTML_PAGE = `<!DOCTYPE html>
             let displayData = filteredAccounts;
             if (filterMode === 'local') {
                 displayData = filteredAccounts.filter(acc => acc.source === 'local');
+            } else if (filterMode === 'with-apikey') {
+                displayData = filteredAccounts.filter(acc => acc.apikey);
+            } else if (filterMode === 'without-apikey') {
+                displayData = filteredAccounts.filter(acc => !acc.apikey);
             }
 
             const totalPages = Math.ceil(displayData.length / pageSize);
@@ -1772,6 +1784,22 @@ const HTML_PAGE = `<!DOCTYPE html>
 
         $('#localAccountsCard').on('click', function() {
             filterMode = 'local';
+            $('.stat-card').removeClass('active');
+            $(this).addClass('active');
+            currentPage = 1;
+            renderTable();
+        });
+
+        $('#withApikeyCard').on('click', function() {
+            filterMode = 'with-apikey';
+            $('.stat-card').removeClass('active');
+            $(this).addClass('active');
+            currentPage = 1;
+            renderTable();
+        });
+
+        $('#withoutApikeyCard').on('click', function() {
+            filterMode = 'without-apikey';
             $('.stat-card').removeClass('active');
             $(this).addClass('active');
             currentPage = 1;
@@ -2127,6 +2155,8 @@ const HTML_PAGE = `<!DOCTYPE html>
                 // 更新统计
                 $totalAccounts.text(accounts.length);
                 $('#localAccountsCount').text(accounts.filter(a => a.source === 'local').length);
+                $('#withApikeyCount').text(accounts.filter(a => a.apikey).length);
+                $('#withoutApikeyCount').text(accounts.filter(a => !a.apikey).length);
 
                 // 重新渲染表格（保持当前过滤模式）
                 renderTable();
