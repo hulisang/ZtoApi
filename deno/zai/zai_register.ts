@@ -1,15 +1,7 @@
 /**
- * Z.AI 账号注册管理系统 V2 - 带登录页面和高级配置
- *
- * 功能特性:
- * - 登录鉴权: Session 管理，防止未授权访问
- * - 批量注册: 支持多线程并发注册 Z.AI 账号
- * - 实时监控: SSE 推送实时日志和进度
- * - 账号管理: 查看、搜索、导出注册的账号
- * - 高级配置: 可自定义邮件超时、注册间隔、通知等参数
- *
- * 数据存储: Deno KV (内置键值数据库)
- *
+ * Z.AI账号注册管理V2
+ * 登录鉴权/批量注册/实时监控/账号管理/高级配置
+ * 存储: Deno KV
  * @author dext7r
  */
 
@@ -17,16 +9,16 @@ import { serve } from "https://deno.land/std@0.208.0/http/server.ts";
 
 // ==================== 配置区域 ====================
 
-const PORT = 8001;  // Web 服务监听端口
-const NOTIFY_INTERVAL = 3600;  // 通知发送间隔（秒）
-const MAX_LOGIN_ATTEMPTS = 5;  // 最大登录失败次数
-const LOGIN_LOCK_DURATION = 900000;  // 登录锁定时长（15分钟）
+const PORT = 8001;  // 端口
+const NOTIFY_INTERVAL = 3600;  // 通知间隔秒
+const MAX_LOGIN_ATTEMPTS = 5;  // 最大登录失败
+const LOGIN_LOCK_DURATION = 900000;  // 锁定15分钟
 
-// 鉴权配置 - 可通过环境变量覆盖
+// 鉴权配置
 const AUTH_USERNAME = Deno.env.get("ZAI_USERNAME") || "admin";
 const AUTH_PASSWORD = Deno.env.get("ZAI_PASSWORD") || "123456";
 
-// 邮箱域名列表 - 用于生成随机临时邮箱
+// 邮箱域名
 const DOMAINS = [
   "chatgptuk.pp.ua", "freemails.pp.ua", "email.gravityengine.cc", "gravityengine.cc",
   "3littlemiracles.com", "almiswelfare.org", "gyan-netra.com", "iraniandsa.org",
@@ -37,40 +29,37 @@ const DOMAINS = [
 
 // ==================== 数据存储 ====================
 
-// Deno KV 数据库实例（初始化后保证非 null）
+// KV数据库
 let kv: Deno.Kv;
 
-// 初始化 KV 数据库
+// 初始化KV
 async function initKV() {
   try {
     kv = await Deno.openKv();
-    console.log("[DEBUG] Deno KV database initialized");
+    console.log("[DEBUG] KV已初始化");
   } catch (error) {
-    console.error("❌ Failed to initialize Deno KV:", error);
-    console.error("⚠️  CRITICAL: Registration and account management will NOT work!");
-    console.error("   Please ensure Deno has --unstable-kv flag enabled.");
-    console.error("   Run with: deno run --allow-net --allow-env --allow-read --unstable-kv zai_register.ts");
-    throw new Error("Deno KV initialization failed. Cannot continue without KV storage.");
+    console.error("❌ KV初始化失败:", error);
+    console.error("⚠️ 需要--unstable-kv标志");
+    console.error("   运行: deno run --allow-net --allow-env --allow-read --unstable-kv zai_register.ts");
+    throw new Error("KV初始化失败");
   }
 }
 
 // ==================== 全局状态 ====================
 
-let isRunning = false;  // 注册任务是否正在运行
-let shouldStop = false;  // 是否请求停止注册
-const sseClients = new Set<ReadableStreamDefaultController>();  // SSE 客户端连接池
-let stats = { success: 0, failed: 0, startTime: 0, lastNotifyTime: 0 };  // 统计信息
-const logHistory: any[] = [];  // 日志历史记录（内存缓存）
-const MAX_LOG_HISTORY = 500;  // 最大日志条数
-let logSaveTimer: number | null = null;  // 日志保存定时器
-const LOG_SAVE_INTERVAL = 30000;  // 日志保存间隔（30秒）
+let isRunning = false;  // 运行中
+let shouldStop = false;  // 停止标志
+const sseClients = new Set<ReadableStreamDefaultController>();  // SSE连接
+let stats = { success: 0, failed: 0, startTime: 0, lastNotifyTime: 0 };  // 统计
+const logHistory: any[] = [];  // 日志缓存
+const MAX_LOG_HISTORY = 500;  // 最大日志数
+let logSaveTimer: number | null = null;  // 日志定时器
+const LOG_SAVE_INTERVAL = 30000;  // 保存间隔30秒
 
-// 登录失败跟踪（IP -> {attempts: number, lockedUntil: number}）
+// 登录失败跟踪
 const loginAttempts = new Map<string, { attempts: number; lockedUntil: number }>();
 
-/**
- * 批量保存日志到 KV（节流）
- */
+// 批量保存日志(节流)
 async function saveLogs(): Promise<void> {
   if (logHistory.length === 0) return;
 
@@ -78,7 +67,7 @@ async function saveLogs(): Promise<void> {
     const logKey = ["logs", "recent"];
     const now = Date.now();
 
-    // 只保存最近1小时的日志，并过滤旧数据
+    // 保存1小时内日志
     const oneHourAgo = now - 3600000;
     const recentLogs = logHistory
       .filter(log => log.timestamp > oneHourAgo)
@@ -87,7 +76,6 @@ async function saveLogs(): Promise<void> {
     if (recentLogs.length > 0) {
       await kv.set(logKey, recentLogs, { expireIn: 3600000 });  // 1小时过期
     } else {
-      // 如果没有新日志，删除旧key
       await kv.delete(logKey);
     }
   } catch (error) {
@@ -95,9 +83,7 @@ async function saveLogs(): Promise<void> {
   }
 }
 
-/**
- * 调度日志保存（防抖）
- */
+// 调度日志保存(防抖)
 function scheduleSaveLogs() {
   if (logSaveTimer) {
     clearTimeout(logSaveTimer);
@@ -109,9 +95,7 @@ function scheduleSaveLogs() {
   }, LOG_SAVE_INTERVAL);
 }
 
-/**
- * 广播消息并自动保存日志
- */
+// 广播消息
 function broadcast(data: any) {
   const message = `data: ${JSON.stringify(data)}\n\n`;
   console.log(`📤 broadcast: type=${data.type}, sseClients=${sseClients.size}, message=${message.substring(0, 100)}...`);
@@ -120,7 +104,7 @@ function broadcast(data: any) {
     try {
       controller.enqueue(new TextEncoder().encode(message));
     } catch (err) {
-      console.log(`⚠️ SSE客户端发送失败，移除连接:`, err);
+      console.log(`⚠️ SSE发送失败:`, err);
       sseClients.delete(controller);
     }
   }
@@ -129,7 +113,7 @@ function broadcast(data: any) {
   if (data.type === 'log' || data.type === 'start' || data.type === 'complete') {
     logHistory.push({ ...data, timestamp: Date.now() });
 
-    // 清理超过1小时的旧日志（内存）
+    // 清理1小时外日志
     const oneHourAgo = Date.now() - 3600000;
     while (logHistory.length > 0 && logHistory[0].timestamp < oneHourAgo) {
       logHistory.shift();
@@ -140,46 +124,39 @@ function broadcast(data: any) {
       logHistory.shift();
     }
 
-    // 调度批量保存（节流，30秒一次）
+    // 调度批量保存
     scheduleSaveLogs();
 
-    // 在任务完成或停止时立即保存
+    // 完成或错误时立即保存
     if (data.type === 'complete' || (data.type === 'log' && data.level === 'error')) {
       saveLogs().catch(() => {});
     }
   }
 }
 
-/**
- * 生成唯一的 Session ID
- */
+// 生成SessionID
 function generateSessionId(): string {
   return crypto.randomUUID();
 }
 
-/**
- * 获取客户端 IP 地址
- */
+// 获取客户端IP
 function getClientIP(req: Request): string {
-  // 优先从 X-Forwarded-For 获取（反向代理场景）
+  // X-Forwarded-For
   const forwarded = req.headers.get("X-Forwarded-For");
   if (forwarded) {
     return forwarded.split(',')[0].trim();
   }
 
-  // 从 X-Real-IP 获取
+  // X-Real-IP
   const realIP = req.headers.get("X-Real-IP");
   if (realIP) {
     return realIP;
   }
 
-  // 默认返回占位符（Deno.serve 不直接提供 socket 信息）
   return "unknown";
 }
 
-/**
- * 检查 IP 是否被锁定
- */
+// 检查IP锁定
 function checkIPLocked(ip: string): { locked: boolean; remainingTime?: number } {
   const record = loginAttempts.get(ip);
   if (!record) {
@@ -190,62 +167,54 @@ function checkIPLocked(ip: string): { locked: boolean; remainingTime?: number } 
   if (record.lockedUntil > now) {
     return {
       locked: true,
-      remainingTime: Math.ceil((record.lockedUntil - now) / 1000)  // 秒
+      remainingTime: Math.ceil((record.lockedUntil - now) / 1000)
     };
   }
 
-  // 锁定已过期，清除记录
+  // 过期清除
   loginAttempts.delete(ip);
   return { locked: false };
 }
 
-/**
- * 记录登录失败
- */
+// 记录登录失败
 function recordLoginFailure(ip: string): void {
   const record = loginAttempts.get(ip) || { attempts: 0, lockedUntil: 0 };
   record.attempts++;
 
   if (record.attempts >= MAX_LOGIN_ATTEMPTS) {
     record.lockedUntil = Date.now() + LOGIN_LOCK_DURATION;
-    console.log(`🔒 IP ${ip} 已被锁定 ${LOGIN_LOCK_DURATION / 60000} 分钟（失败 ${record.attempts} 次）`);
+    console.log(`🔒 IP ${ip} 已锁定 ${LOGIN_LOCK_DURATION / 60000} 分钟(失败${record.attempts}次)`);
   }
 
   loginAttempts.set(ip, record);
 }
 
-/**
- * 清除登录失败记录
- */
+// 清除登录失败
 function clearLoginFailure(ip: string): void {
   loginAttempts.delete(ip);
 }
 
-// 注册配置（可动态调整）
+// 注册配置
 let registerConfig = {
-  emailTimeout: 120,  // 邮件等待超时（秒）
-  emailCheckInterval: 1,  // 邮件轮询间隔（秒）
-  registerDelay: 2000,  // 每个账号注册间隔（毫秒）
-  retryTimes: 3,  // API 重试次数
-  concurrency: 10,  // 并发数（1-10）
-  enableNotification: false,  // 是否启用通知（默认关闭）
-  pushplusToken: "",  // PushPlus Token（需要用户自行配置）
+  emailTimeout: 120,  // 邮件超时秒
+  emailCheckInterval: 1,  // 轮询间隔秒
+  registerDelay: 2000,  // 间隔毫秒
+  retryTimes: 3,  // 重试次数
+  concurrency: 10,  // 并发1-10
+  enableNotification: false,  // 通知默认关
+  pushplusToken: "",  // PushPlus Token
 };
 
 // ==================== 鉴权相关 ====================
 
-/**
- * 检查请求是否已认证（从 KV 读取 session）
- * @param req HTTP 请求对象
- * @returns 认证状态和 session ID
- */
+// 检查请求认证
 async function checkAuth(req: Request): Promise<{ authenticated: boolean; sessionId?: string }> {
   const cookies = req.headers.get("Cookie") || "";
   const sessionMatch = cookies.match(/sessionId=([^;]+)/);
 
   if (sessionMatch) {
     const sessionId = sessionMatch[1];
-    // 从 KV 检查 session 是否存在且未过期
+    // KV检查session
     const sessionKey = ["sessions", sessionId];
     const session = await kv.get(sessionKey);
 
@@ -259,10 +228,7 @@ async function checkAuth(req: Request): Promise<{ authenticated: boolean; sessio
 
 // ==================== 工具函数 ====================
 
-/**
- * 生成随机邮箱地址
- * @returns 随机生成的邮箱地址
- */
+// 生成随机邮箱
 function createEmail(): string {
   const randomHex = Array.from({ length: 12 }, () =>
     Math.floor(Math.random() * 16).toString(16)
@@ -271,10 +237,7 @@ function createEmail(): string {
   return `${randomHex}@${domain}`;
 }
 
-/**
- * 生成随机密码
- * @returns 14位随机密码
- */
+// 生成随机密码
 function createPassword(): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
   return Array.from({ length: 14 }, () =>
@@ -282,13 +245,9 @@ function createPassword(): string {
   ).join('');
 }
 
-/**
- * 发送 PushPlus 通知
- * @param title 通知标题
- * @param content 通知内容（支持 Markdown）
- */
+// PushPlus通知
 async function sendNotification(title: string, content: string): Promise<void> {
-  // 检查是否启用通知和 Token 是否配置
+  // 检查配置
   if (!registerConfig.enableNotification || !registerConfig.pushplusToken) return;
 
   try {
@@ -307,22 +266,18 @@ async function sendNotification(title: string, content: string): Promise<void> {
   }
 }
 
-/**
- * 获取验证邮件
- * @param email 邮箱地址
- * @returns 邮件内容或 null
- */
+// 获取验证邮件
 async function fetchVerificationEmail(email: string): Promise<string | null> {
-  const actualTimeout = registerConfig.emailTimeout;  // 使用配置的超时时间
-  const checkInterval = registerConfig.emailCheckInterval;  // 使用配置的轮询间隔
+  const actualTimeout = registerConfig.emailTimeout;
+  const checkInterval = registerConfig.emailCheckInterval;
   const startTime = Date.now();
   const apiUrl = `https://mail.chatgpt.org.uk/api/get-emails?email=${encodeURIComponent(email)}`;
 
   let attempts = 0;
-  let lastReportTime = 0;  // 上次报告进度的时间
-  const reportInterval = 10;  // 每 10 秒报告一次进度
+  let lastReportTime = 0;
+  const reportInterval = 10;
 
-  // 格式化时间显示
+  // 格式化时间
   const formatTime = (seconds: number): string => {
     if (seconds < 60) return `${seconds}s`;
     const mins = Math.floor(seconds / 60);
@@ -336,7 +291,7 @@ async function fetchVerificationEmail(email: string): Promise<string | null> {
       const response = await fetch(apiUrl, { signal: AbortSignal.timeout(10000) });
       const data = await response.json();
 
-      // 每 10 秒报告一次进度
+      // 每10秒报告
       const elapsed = Math.floor((Date.now() - startTime) / 1000);
       if (elapsed - lastReportTime >= reportInterval && elapsed > 0) {
         const progress = Math.min(Math.floor((elapsed / actualTimeout) * 100), 99);
@@ -344,7 +299,7 @@ async function fetchVerificationEmail(email: string): Promise<string | null> {
         broadcast({
           type: 'log',
           level: 'info',
-          message: `  等待验证邮件中... [${progress}%] 已用: ${formatTime(elapsed)} / 剩余: ${formatTime(remaining)} (已尝试 ${attempts} 次)`
+          message: `  等待邮件[${progress}%] 已用:${formatTime(elapsed)}/剩余:${formatTime(remaining)}(尝试${attempts}次)`
         });
         lastReportTime = elapsed;
       }
@@ -352,19 +307,18 @@ async function fetchVerificationEmail(email: string): Promise<string | null> {
       if (data?.emails) {
         for (const emailData of data.emails) {
           if (emailData.from?.toLowerCase().includes("z.ai")) {
-            broadcast({ type: 'log', level: 'success', message: `  ✓ 收到验证邮件 (耗时 ${Math.floor((Date.now() - startTime) / 1000)}s)` });
+            broadcast({ type: 'log', level: 'success', message: `  ✓ 收到邮件(${Math.floor((Date.now() - startTime) / 1000)}s)` });
             return emailData.content || null;
           }
         }
       }
     } catch {
-      // 继续重试
+      // 重试
     }
-    // 使用配置的轮询间隔
     await new Promise(resolve => setTimeout(resolve, checkInterval * 1000));
   }
 
-  broadcast({ type: 'log', level: 'error', message: `  ✗ 验证邮件超时 (等待了 ${actualTimeout}s)` });
+  broadcast({ type: 'log', level: 'error', message: `  ✗ 邮件超时(${actualTimeout}s)` });
   return null;
 }
 
@@ -381,10 +335,7 @@ function parseVerificationUrl(url: string): { token: string | null; email: strin
   }
 }
 
-/**
- * API登录功能 - 移植自Python版本
- * 使用用户Token登录到API获取access_token
- */
+// API登录
 async function loginToApi(token: string): Promise<string | null> {
   const url = 'https://api.z.ai/api/auth/z/login';
   const headers = {
@@ -399,7 +350,7 @@ async function loginToApi(token: string): Promise<string | null> {
       method: 'POST',
       headers,
       body: JSON.stringify({ token }),
-      signal: AbortSignal.timeout(15000)  // 15秒超时
+      signal: AbortSignal.timeout(15000)
     });
 
     const result = await response.json();
@@ -410,18 +361,15 @@ async function loginToApi(token: string): Promise<string | null> {
         return accessToken;
       }
     }
-    broadcast({ type: 'log', level: 'error', message: `  ✗ API登录失败: ${JSON.stringify(result)}` });
+    broadcast({ type: 'log', level: 'error', message: `  ✗ API登录失败:${JSON.stringify(result)}` });
     return null;
   } catch (error) {
-    broadcast({ type: 'log', level: 'error', message: `  ✗ API登录异常: ${error}` });
+    broadcast({ type: 'log', level: 'error', message: `  ✗ API登录异常:${error}` });
     return null;
   }
 }
 
-/**
- * 获取客户信息 - 移植自Python版本
- * 获取组织ID和项目ID用于创建API密钥
- */
+// 获取客户信息
 async function getCustomerInfo(accessToken: string): Promise<{ orgId: string | null; projectId: string | null }> {
   const url = 'https://api.z.ai/api/biz/customer/getCustomerInfo';
   const headers = {
@@ -435,7 +383,7 @@ async function getCustomerInfo(accessToken: string): Promise<{ orgId: string | n
     const response = await fetch(url, {
       method: 'GET',
       headers,
-      signal: AbortSignal.timeout(20000)  // 20秒超时
+      signal: AbortSignal.timeout(20000)
     });
 
     const result = await response.json();
@@ -447,23 +395,20 @@ async function getCustomerInfo(accessToken: string): Promise<{ orgId: string | n
         const projectId = projects.length > 0 ? projects[0].projectId : null;
 
         if (orgId && projectId) {
-          broadcast({ type: 'log', level: 'success', message: `  ✓ 获取客户信息成功` });
+          broadcast({ type: 'log', level: 'success', message: `  ✓ 获取组织成功` });
           return { orgId, projectId };
         }
       }
     }
-    broadcast({ type: 'log', level: 'error', message: `  ✗ 获取客户信息失败: ${JSON.stringify(result)}` });
+    broadcast({ type: 'log', level: 'error', message: `  ✗ 获取组织失败:${JSON.stringify(result)}` });
     return { orgId: null, projectId: null };
   } catch (error) {
-    broadcast({ type: 'log', level: 'error', message: `  ✗ 获取客户信息异常: ${error}` });
+    broadcast({ type: 'log', level: 'error', message: `  ✗ 获取组织异常:${error}` });
     return { orgId: null, projectId: null };
   }
 }
 
-/**
- * 创建API密钥 - 移植自Python版本
- * 生成最终的API密钥
- */
+// 创建APIKEY
 async function createApiKey(accessToken: string, orgId: string, projectId: string): Promise<string | null> {
   const url = `https://api.z.ai/api/biz/v1/organization/${orgId}/projects/${projectId}/api_keys`;
   const headers = {
@@ -475,11 +420,12 @@ async function createApiKey(accessToken: string, orgId: string, projectId: strin
   };
 
   try {
+    const randomName = 'key_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
     const response = await fetch(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ name: 'auto_generated_key' }),
-      signal: AbortSignal.timeout(30000)  // 30秒超时
+      body: JSON.stringify({ name: randomName }),
+      signal: AbortSignal.timeout(30000)
     });
 
     const result = await response.json();
@@ -487,25 +433,27 @@ async function createApiKey(accessToken: string, orgId: string, projectId: strin
       const apiKeyData = result.data || {};
       const finalKey = `${apiKeyData.apiKey}.${apiKeyData.secretKey}`;
       if (finalKey && finalKey !== 'undefined.undefined') {
-        broadcast({ type: 'log', level: 'success', message: `  ✓ API密钥创建成功` });
+        broadcast({ type: 'log', level: 'success', message: `  ✓ APIKEY创建成功` });
         return finalKey;
       }
     }
-    broadcast({ type: 'log', level: 'error', message: `  ✗ 创建API密钥失败: ${JSON.stringify(result)}` });
+    broadcast({ type: 'log', level: 'error', message: `  ✗ APIKEY创建失败:${JSON.stringify(result)}` });
     return null;
   } catch (error) {
-    broadcast({ type: 'log', level: 'error', message: `  ✗ 创建API密钥异常: ${error}` });
+    broadcast({ type: 'log', level: 'error', message: `  ✗ APIKEY创建异常:${error}` });
     return null;
   }
 }
 
-/**
- * 检查账号Token是否有效
- * 通过尝试登录API来验证token
- */
+// 清理Token
+function cleanToken(token: string): string {
+  return token.includes('----') ? token.split('----')[0].trim() : token.trim();
+}
+
+// 检查账号有效性
 async function checkAccountStatus(token: string): Promise<boolean> {
   try {
-    const accessToken = await loginToApi(token);
+    const accessToken = await loginToApi(cleanToken(token));
     return accessToken !== null;
   } catch (error) {
     return false;
@@ -520,26 +468,25 @@ async function saveAccount(email: string, password: string, token: string, apike
       email,
       password,
       token,
-      apikey: apikey || null,  // 新增 APIKEY 字段
-      status: status,  // 账号状态: active/inactive
+      apikey: apikey || null,
+      status: status,
       createdAt: new Date().toISOString()
     });
-    return true; // 保存成功
+    return true;
   } catch (error) {
-    console.error("❌ Failed to save account to KV:", error);
+    console.error("❌ KV保存失败:", error);
 
-    // Check if it's a quota exhausted error
     const errorMessage = error instanceof Error ? error.message : String(error);
     if (errorMessage.includes("quota is exhausted")) {
       broadcast({
         type: 'log',
         level: 'error',
-        message: `❌ KV 存储配额已耗尽，账号将保存到本地: ${email}`
+        message: `❌ KV配额耗尽,保存本地:${email}`
       });
-      return false; // 配额耗尽，返回false
+      return false;
     }
 
-    throw error; // Re-throw other errors
+    throw error;
   }
 }
 
@@ -558,12 +505,12 @@ async function registerAccount(): Promise<RegisterResult> {
     broadcast({
       type: 'log',
       level: 'info',
-      message: `▶ 开始注册: ${email}`,
-      link: { text: '查看邮箱', url: emailCheckUrl }
+      message: `▶ 开始:${email}`,
+      link: { text: '邮箱', url: emailCheckUrl }
     });
 
     // 1. 注册
-    broadcast({ type: 'log', level: 'info', message: `  → 发送注册请求...` });
+    broadcast({ type: 'log', level: 'info', message: `  → 注册...` });
     const signupResponse = await fetch("https://chat.z.ai/api/v1/auths/signup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -572,26 +519,26 @@ async function registerAccount(): Promise<RegisterResult> {
     });
 
     if (signupResponse.status !== 200) {
-      broadcast({ type: 'log', level: 'error', message: `  ✗ 注册请求失败: HTTP ${signupResponse.status}` });
+      broadcast({ type: 'log', level: 'error', message: `  ✗ 注册失败:HTTP${signupResponse.status}` });
       stats.failed++;
       return { success: false };
     }
 
     const signupResult = await signupResponse.json();
     if (!signupResult.success) {
-      broadcast({ type: 'log', level: 'error', message: `  ✗ 注册被拒绝: ${JSON.stringify(signupResult)}` });
+      broadcast({ type: 'log', level: 'error', message: `  ✗ 被拒绝:${JSON.stringify(signupResult)}` });
       stats.failed++;
       return { success: false };
     }
 
-    broadcast({ type: 'log', level: 'success', message: `  ✓ 注册请求成功` });
+    broadcast({ type: 'log', level: 'success', message: `  ✓ 注册成功` });
 
     // 2. 获取验证邮件
     broadcast({
       type: 'log',
       level: 'info',
-      message: `  → 等待验证邮件: ${email}`,
-      link: { text: '点击打开邮箱', url: emailCheckUrl }
+      message: `  → 等待邮件:${email}`,
+      link: { text: '打开邮箱', url: emailCheckUrl }
     });
     const emailContent = await fetchVerificationEmail(email);
     if (!emailContent) {
@@ -600,52 +547,51 @@ async function registerAccount(): Promise<RegisterResult> {
     }
 
     // 3. 提取验证链接
-    broadcast({ type: 'log', level: 'info', message: `  → 提取验证链接...` });
+    broadcast({ type: 'log', level: 'info', message: `  → 提取链接...` });
 
-    // 尝试多种匹配方式
+    // 多种匹配
     let verificationUrl = null;
 
-    // 方式1: 匹配 /auth/verify_email 路径（新版本）
+    // 方式1: /auth/verify_email
     let match = emailContent.match(/https:\/\/chat\.z\.ai\/auth\/verify_email\?[^\s<>"']+/);
     if (match) {
       verificationUrl = match[0].replace(/&amp;/g, '&').replace(/&#39;/g, "'");
     }
 
-    // 方式2: 匹配 /verify_email 路径（旧版本）
+    // 方式2: /verify_email
     if (!verificationUrl) {
       match = emailContent.match(/https:\/\/chat\.z\.ai\/verify_email\?[^\s<>"']+/);
       if (match) {
         verificationUrl = match[0].replace(/&amp;/g, '&').replace(/&#39;/g, "'");
-        broadcast({ type: 'log', level: 'success', message: `  ✓ 找到验证链接 (旧版路径)` });
+        broadcast({ type: 'log', level: 'success', message: `  ✓ 旧版路径` });
       }
     }
 
-    // 方式3: 匹配HTML编码的URL
+    // 方式3: HTML编码
     if (!verificationUrl) {
       match = emailContent.match(/https?:\/\/chat\.z\.ai\/(?:auth\/)?verify_email[^"'\s]*/);
       if (match) {
         verificationUrl = match[0].replace(/&amp;/g, '&').replace(/&#39;/g, "'");
-        broadcast({ type: 'log', level: 'success', message: `  ✓ 找到验证链接 (HTML解码)` });
+        broadcast({ type: 'log', level: 'success', message: `  ✓ HTML解码` });
       }
     }
 
-    // 方式4: 在JSON中查找
+    // 方式4: JSON格式
     if (!verificationUrl) {
       try {
         const urlMatch = emailContent.match(/"(https?:\/\/[^"]*verify_email[^"]*)"/);
         if (urlMatch) {
           verificationUrl = urlMatch[1].replace(/\\u0026/g, '&').replace(/&amp;/g, '&').replace(/&#39;/g, "'");
-          broadcast({ type: 'log', level: 'success', message: `  ✓ 找到验证链接 (JSON格式)` });
+          broadcast({ type: 'log', level: 'success', message: `  ✓ JSON格式` });
         }
       } catch (e) {
-        // 忽略JSON解析错误
+        // 忽略
       }
     }
 
     if (!verificationUrl) {
-      // 打印邮件内容的前500个字符用于调试
       const preview = emailContent.substring(0, 500).replace(/\n/g, ' ');
-      broadcast({ type: 'log', level: 'error', message: `  ✗ 未找到验证链接，邮件预览: ${preview}...` });
+      broadcast({ type: 'log', level: 'error', message: `  ✗ 未找到链接:${preview}...` });
       stats.failed++;
       return { success: false };
     }
@@ -653,15 +599,15 @@ async function registerAccount(): Promise<RegisterResult> {
 
     const { token, email: emailFromUrl, username } = parseVerificationUrl(verificationUrl);
     if (!token || !emailFromUrl || !username) {
-      broadcast({ type: 'log', level: 'error', message: `  ✗ 验证链接格式错误` });
+      broadcast({ type: 'log', level: 'error', message: `  ✗ 链接格式错` });
       stats.failed++;
       return { success: false };
     }
 
-    broadcast({ type: 'log', level: 'success', message: `  ✓ 验证链接已提取` });
+    broadcast({ type: 'log', level: 'success', message: `  ✓ 链接已提取` });
 
     // 4. 完成注册
-    broadcast({ type: 'log', level: 'info', message: `  → 提交验证信息...` });
+    broadcast({ type: 'log', level: 'info', message: `  → 验证...` });
     const finishResponse = await fetch("https://chat.z.ai/api/v1/auths/finish_signup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -670,56 +616,53 @@ async function registerAccount(): Promise<RegisterResult> {
     });
 
     if (finishResponse.status !== 200) {
-      broadcast({ type: 'log', level: 'error', message: `  ✗ 验证失败: HTTP ${finishResponse.status}` });
+      broadcast({ type: 'log', level: 'error', message: `  ✗ 验证失败:HTTP${finishResponse.status}` });
       stats.failed++;
       return { success: false };
     }
 
     const finishResult = await finishResponse.json();
     if (!finishResult.success) {
-      broadcast({ type: 'log', level: 'error', message: `  ✗ 验证被拒绝: ${JSON.stringify(finishResult)}` });
+      broadcast({ type: 'log', level: 'error', message: `  ✗ 验证拒绝:${JSON.stringify(finishResult)}` });
       stats.failed++;
       return { success: false };
     }
 
-    // 5. 获取用户Token
+    // 5. 获取Token
     const userToken = finishResult.user?.token;
     if (!userToken) {
-      broadcast({ type: 'log', level: 'error', message: `  ✗ 未获取到用户Token` });
+      broadcast({ type: 'log', level: 'error', message: `  ✗ 无Token` });
       stats.failed++;
       return { success: false };
     }
 
-    broadcast({ type: 'log', level: 'success', message: `  ✓ 获得用户Token` });
+    broadcast({ type: 'log', level: 'success', message: `  ✓ 获得Token` });
 
     // 6. API登录
-    broadcast({ type: 'log', level: 'info', message: `  → 登录API平台...` });
+    broadcast({ type: 'log', level: 'info', message: `  → 登录API...` });
     const accessToken = await loginToApi(userToken);
     if (!accessToken) {
-      // 即使API登录失败，也保存账号（只有Token，没有APIKEY）
       const account = { email, password, token: userToken, apikey: null, createdAt: new Date().toISOString() };
       const saved = await saveAccount(email, password, userToken);
 
       if (saved) {
-        // 成功保存到KV
         stats.success++;
         broadcast({
           type: 'log',
           level: 'warning',
-          message: `⚠️ 注册成功但API登录失败: ${email} (仅获取Token)`,
+          message: `⚠️ 成功但API登录失败:${email}(仅Token)`,
           stats: { success: stats.success, failed: stats.failed, total: stats.success + stats.failed },
-          link: { text: '查看邮箱', url: emailCheckUrl }
+          link: { text: '邮箱', url: emailCheckUrl }
         });
         broadcast({ type: 'account_added', account });
       } else {
-        // KV保存失败（配额耗尽），发送local_account_added事件
         stats.success++;
         broadcast({
           type: 'log',
           level: 'warning',
-          message: `⚠️ 注册成功但API登录失败: ${email} (仅获取Token，已保存到本地)`,
+          message: `⚠️ 成功但API登录失败:${email}(仅Token,本地)`,
           stats: { success: stats.success, failed: stats.failed, total: stats.success + stats.failed },
-          link: { text: '查看邮箱', url: emailCheckUrl }
+          link: { text: '邮箱', url: emailCheckUrl }
         });
         broadcast({ type: 'local_account_added', account });
       }
@@ -727,34 +670,31 @@ async function registerAccount(): Promise<RegisterResult> {
       return { success: true, account };
     }
 
-    // 7. 获取客户信息
-    broadcast({ type: 'log', level: 'info', message: `  → 获取组织信息...` });
+    // 7. 获取组织
+    broadcast({ type: 'log', level: 'info', message: `  → 组织...` });
     const { orgId, projectId } = await getCustomerInfo(accessToken);
     if (!orgId || !projectId) {
-      // 保存账号（只有Token，没有APIKEY）
       const account = { email, password, token: userToken, apikey: null, createdAt: new Date().toISOString() };
       const saved = await saveAccount(email, password, userToken);
 
       if (saved) {
-        // 成功保存到KV
         stats.success++;
         broadcast({
           type: 'log',
           level: 'warning',
-          message: `⚠️ 注册成功但获取组织信息失败: ${email} (仅获取Token)`,
+          message: `⚠️ 成功但组织失败:${email}(仅Token)`,
           stats: { success: stats.success, failed: stats.failed, total: stats.success + stats.failed },
-          link: { text: '查看邮箱', url: emailCheckUrl }
+          link: { text: '邮箱', url: emailCheckUrl }
         });
         broadcast({ type: 'account_added', account });
       } else {
-        // KV保存失败（配额耗尽），发送local_account_added事件
         stats.success++;
         broadcast({
           type: 'log',
           level: 'warning',
-          message: `⚠️ 注册成功但获取组织信息失败: ${email} (仅获取Token，已保存到本地)`,
+          message: `⚠️ 成功但组织失败:${email}(仅Token,本地)`,
           stats: { success: stats.success, failed: stats.failed, total: stats.success + stats.failed },
-          link: { text: '查看邮箱', url: emailCheckUrl }
+          link: { text: '邮箱', url: emailCheckUrl }
         });
         broadcast({ type: 'local_account_added', account });
       }
@@ -762,55 +702,53 @@ async function registerAccount(): Promise<RegisterResult> {
       return { success: true, account };
     }
 
-    // 8. 创建API密钥
-    broadcast({ type: 'log', level: 'info', message: `  → 创建API密钥...` });
+    // 8. 创建APIKEY
+    broadcast({ type: 'log', level: 'info', message: `  → APIKEY...` });
     const apiKey = await createApiKey(accessToken, orgId, projectId);
 
-    // 9. 保存完整账号信息
+    // 9. 保存
     const account = { email, password, token: userToken, apikey: apiKey || null, createdAt: new Date().toISOString() };
     const saved = await saveAccount(email, password, userToken, apiKey || undefined);
 
     stats.success++;
 
     if (saved) {
-      // 成功保存到KV
       if (apiKey) {
         broadcast({
           type: 'log',
           level: 'success',
-          message: `✅ 注册完成: ${email} (包含APIKEY)`,
+          message: `✅ 完成:${email}(含KEY)`,
           stats: { success: stats.success, failed: stats.failed, total: stats.success + stats.failed },
-          link: { text: '查看邮箱', url: emailCheckUrl }
+          link: { text: '邮箱', url: emailCheckUrl }
         });
         broadcast({ type: 'account_added', account });
       } else {
         broadcast({
           type: 'log',
           level: 'warning',
-          message: `⚠️ 注册成功但创建API密钥失败: ${email} (仅获取Token)`,
+          message: `⚠️ 成功但KEY失败:${email}(仅Token)`,
           stats: { success: stats.success, failed: stats.failed, total: stats.success + stats.failed },
-          link: { text: '查看邮箱', url: emailCheckUrl }
+          link: { text: '邮箱', url: emailCheckUrl }
         });
         broadcast({ type: 'account_added', account });
       }
     } else {
-      // KV保存失败（配额耗尽），发送local_account_added事件
       if (apiKey) {
         broadcast({
           type: 'log',
           level: 'success',
-          message: `✅ 注册完成: ${email} (包含APIKEY，已保存到本地)`,
+          message: `✅ 完成:${email}(含KEY,本地)`,
           stats: { success: stats.success, failed: stats.failed, total: stats.success + stats.failed },
-          link: { text: '查看邮箱', url: emailCheckUrl }
+          link: { text: '邮箱', url: emailCheckUrl }
         });
         broadcast({ type: 'local_account_added', account });
       } else {
         broadcast({
           type: 'log',
           level: 'warning',
-          message: `⚠️ 注册成功但创建API密钥失败: ${email} (仅获取Token，已保存到本地)`,
+          message: `⚠️ 成功但KEY失败:${email}(仅Token,本地)`,
           stats: { success: stats.success, failed: stats.failed, total: stats.success + stats.failed },
-          link: { text: '查看邮箱', url: emailCheckUrl }
+          link: { text: '邮箱', url: emailCheckUrl }
         });
         broadcast({ type: 'local_account_added', account });
       }
@@ -819,34 +757,33 @@ async function registerAccount(): Promise<RegisterResult> {
     return { success: true, account };
   } catch (error: any) {
     const msg = error instanceof Error ? error.message : String(error);
-    broadcast({ type: 'log', level: 'error', message: `  ✗ 异常: ${msg}` });
+    broadcast({ type: 'log', level: 'error', message: `  ✗ 异常:${msg}` });
     stats.failed++;
     return { success: false };
   }
 }
 
 async function batchRegister(count: number): Promise<void> {
-  console.log(`🚀 batchRegister 开始，count=${count}, sseClients.size=${sseClients.size}`);
+  console.log(`🚀 批量注册,count=${count},clients=${sseClients.size}`);
 
   isRunning = true;
   shouldStop = false;
   stats = { success: 0, failed: 0, startTime: Date.now(), lastNotifyTime: Date.now() };
 
-  console.log(`📡 准备广播 'start' 事件...`);
+  console.log(`📡 广播start`);
   broadcast({ type: 'start', config: { count } });
-  console.log(`✓ 已广播 'start' 事件`);
+  console.log(`✓ start已广播`);
 
   const concurrency = registerConfig.concurrency || 1;
   let completed = 0;
-  const successAccounts: Array<{ email: string; password: string; token: string; apikey: string | null }> = [];  // 存储成功注册的账号
+  const successAccounts: Array<{ email: string; password: string; token: string; apikey: string | null }> = [];
 
   // 并发注册
   while (completed < count && !shouldStop) {
-    // 计算本批次任务数量
     const batchSize = Math.min(concurrency, count - completed);
     const batchPromises: Promise<RegisterResult>[] = [];
 
-    // 创建并发任务
+    // 创建任务
     for (let i = 0; i < batchSize; i++) {
       const taskIndex = completed + i + 1;
       const progress = Math.floor((taskIndex / count) * 100);
@@ -855,7 +792,7 @@ async function batchRegister(count: number): Promise<void> {
       const remaining = count - taskIndex;
       const eta = avgTimePerAccount > 0 ? Math.ceil(remaining * avgTimePerAccount) : 0;
 
-      // 格式化时间显示
+      // 格式化时间
       const formatTime = (seconds: number): string => {
         if (seconds < 60) return `${seconds}s`;
         const mins = Math.floor(seconds / 60);
@@ -866,15 +803,15 @@ async function batchRegister(count: number): Promise<void> {
       broadcast({
         type: 'log',
         level: 'info',
-        message: `\n[${taskIndex}/${count}] ━━━━━━━━━━━━━━━━━━━━ [${progress}%] 已用: ${formatTime(elapsed)} / 预计剩余: ${formatTime(eta)}`
+        message: `\n[${taskIndex}/${count}] ━━━━━━━━━━━━━━━━━━━━ [${progress}%] 已用:${formatTime(elapsed)}/预计:${formatTime(eta)}`
       });
       batchPromises.push(registerAccount());
     }
 
-    // 等待本批次完成
+    // 等待完成
     const results = await Promise.allSettled(batchPromises);
 
-    // 收集成功注册的账号
+    // 收集成功账号
     for (const result of results) {
       if (result.status === 'fulfilled' && result.value.success && result.value.account) {
         successAccounts.push(result.value.account);
@@ -883,14 +820,14 @@ async function batchRegister(count: number): Promise<void> {
 
     completed += batchSize;
 
-    // 批次间延迟
+    // 批次延迟
     if (completed < count && !shouldStop) {
       await new Promise(resolve => setTimeout(resolve, registerConfig.registerDelay));
     }
   }
 
   if (shouldStop) {
-    broadcast({ type: 'log', level: 'warning', message: `⚠️ 用户手动停止，已完成 ${completed}/${count} 个` });
+    broadcast({ type: 'log', level: 'warning', message: `⚠️ 手动停止,已完成${completed}/${count}` });
   }
 
   const elapsedTime = (Date.now() - stats.startTime) / 1000;
@@ -900,7 +837,7 @@ async function batchRegister(count: number): Promise<void> {
     stats: { success: stats.success, failed: stats.failed, total: stats.success + stats.failed, elapsedTime: elapsedTime.toFixed(1) }
   });
 
-  // 获取总账号数
+  // 总账号数
   let totalAccounts = 0;
   try {
     const entries = kv.list({ prefix: ["zai_accounts"] });
@@ -908,47 +845,47 @@ async function batchRegister(count: number): Promise<void> {
       totalAccounts++;
     }
   } catch {
-    // 忽略错误
+    // 忽略
   }
 
-  // 构建注册详情列表（最多显示10个）
+  // 详情(最多10个)
   let accountsDetail = '';
   if (successAccounts.length > 0) {
-    accountsDetail += '\n\n### 📋 注册详情\n';
+    accountsDetail += '\n\n### 📋 详情\n';
     const displayCount = Math.min(successAccounts.length, 10);
     for (let i = 0; i < displayCount; i++) {
       const acc = successAccounts[i];
       accountsDetail += `${i + 1}. **${acc.email}**\n`;
-      accountsDetail += `   - 密码: \`${acc.password}\`\n`;
-      accountsDetail += `   - Token: \`${acc.token.substring(0, 20)}...\`\n`;
+      accountsDetail += `   - 密码:\`${acc.password}\`\n`;
+      accountsDetail += `   - Token:\`${acc.token.substring(0, 20)}...\`\n`;
       if (acc.apikey) {
-        accountsDetail += `   - APIKEY: \`${acc.apikey.substring(0, 20)}...\`\n`;
+        accountsDetail += `   - KEY:\`${acc.apikey.substring(0, 20)}...\`\n`;
       }
     }
     if (successAccounts.length > displayCount) {
-      accountsDetail += `\n*... 还有 ${successAccounts.length - displayCount} 个账号未显示*\n`;
+      accountsDetail += `\n*还有${successAccounts.length - displayCount}个未显示*\n`;
     }
   }
 
-  // 发送完成通知
+  // 发送通知
   await sendNotification(
-    "✅ Z.AI 注册任务完成",
-    `## ✅ Z.AI 账号注册任务完成
+    "✅ Z.AI注册完成",
+    `## ✅ Z.AI注册完成
 
-### 📊 执行结果
-- **成功**: ${stats.success} 个
-- **失败**: ${stats.failed} 个
-- **本次总计**: ${stats.success + stats.failed} 个
-- **账号总数**: ${totalAccounts} 个
+### 📊 结果
+- 成功:${stats.success}
+- 失败:${stats.failed}
+- 本次:${stats.success + stats.failed}
+- 总计:${totalAccounts}
 
-### ⏱️ 耗时统计
-- **总耗时**: ${elapsedTime.toFixed(1)} 秒 (${(elapsedTime / 60).toFixed(1)} 分钟)
-- **平均速度**: ${((stats.success + stats.failed) / (elapsedTime / 60)).toFixed(1)} 个/分钟
-- **单个耗时**: ${stats.success + stats.failed > 0 ? (elapsedTime / (stats.success + stats.failed)).toFixed(1) : 0} 秒/个
+### ⏱️ 耗时
+- 总:${elapsedTime.toFixed(1)}s (${(elapsedTime / 60).toFixed(1)}min)
+- 速度:${((stats.success + stats.failed) / (elapsedTime / 60)).toFixed(1)}/min
+- 单个:${stats.success + stats.failed > 0 ? (elapsedTime / (stats.success + stats.failed)).toFixed(1) : 0}s
 
 ### 📈 成功率
-- **成功率**: ${stats.success + stats.failed > 0 ? ((stats.success / (stats.success + stats.failed)) * 100).toFixed(1) : 0}%
-- **失败率**: ${stats.success + stats.failed > 0 ? ((stats.failed / (stats.success + stats.failed)) * 100).toFixed(1) : 0}%${accountsDetail}`
+- 成功:${stats.success + stats.failed > 0 ? ((stats.success / (stats.success + stats.failed)) * 100).toFixed(1) : 0}%
+- 失败:${stats.success + stats.failed > 0 ? ((stats.failed / (stats.success + stats.failed)) * 100).toFixed(1) : 0}%${accountsDetail}`
   );
 
   isRunning = false;
@@ -3070,7 +3007,7 @@ async function handler(req: Request): Promise<Response> {
       }
 
       // 尝试使用Token快速获取APIKEY
-      const accessToken = await loginToApi(token);
+      const accessToken = await loginToApi(cleanToken(token));
       if (!accessToken) {
         return new Response(JSON.stringify({
           success: false,
