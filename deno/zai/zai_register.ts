@@ -83,7 +83,6 @@ async function kvDelete(key: Deno.KvKey) {
 async function initKV() {
   try {
     kv = await Deno.openKv();
-    console.log("[DEBUG] KV已初始化");
   } catch (error) {
     console.error("❌ KV初始化失败:", error);
     console.error("⚠️ 需要--unstable-kv标志");
@@ -145,13 +144,12 @@ function scheduleSaveLogs() {
 // 广播消息
 function broadcast(data: any) {
   const message = `data: ${JSON.stringify(data)}\n\n`;
-  console.log(`📤 broadcast: type=${data.type}, sseClients=${sseClients.size}, message=${message.substring(0, 100)}...`);
 
   for (const controller of sseClients) {
     try {
       controller.enqueue(new TextEncoder().encode(message));
     } catch (err) {
-      console.log(`⚠️ SSE发送失败:`, err);
+      // SSE发送失败，移除客户端
       sseClients.delete(controller);
     }
   }
@@ -230,7 +228,6 @@ function recordLoginFailure(ip: string): void {
 
   if (record.attempts >= MAX_LOGIN_ATTEMPTS) {
     record.lockedUntil = Date.now() + LOGIN_LOCK_DURATION;
-    console.log(`🔒 IP ${ip} 已锁定 ${LOGIN_LOCK_DURATION / 60000} 分钟(失败${record.attempts}次)`);
   }
 
   loginAttempts.set(ip, record);
@@ -971,15 +968,11 @@ async function registerAccount(): Promise<RegisterResult> {
 }
 
 async function batchRegister(count: number): Promise<void> {
-  console.log(`🚀 批量注册,count=${count},clients=${sseClients.size}`);
-
   isRunning = true;
   shouldStop = false;
   stats = { success: 0, failed: 0, startTime: Date.now(), lastNotifyTime: Date.now() };
 
-  console.log(`📡 广播start`);
   broadcast({ type: 'start', config: { count } });
-  console.log(`✓ start已广播`);
 
   const concurrency = registerConfig.concurrency || 1;
   let completed = 0;
@@ -1196,7 +1189,6 @@ const LOGIN_PAGE = `<!DOCTYPE html>
                     statusEl.innerHTML = '<span class="w-2 h-2 bg-green-500 rounded-full mr-2 animate-pulse"></span><span>系统正常运行</span>';
                 }
             } catch (error) {
-                console.error('加载KV统计失败:', error);
                 document.getElementById('publicKvStatus').innerHTML = '<span class="w-2 h-2 bg-gray-400 rounded-full mr-2"></span><span>统计加载失败</span>';
             }
         }
@@ -1849,6 +1841,12 @@ const HTML_PAGE = `<!DOCTYPE html>
         let totalTaskCount = 0;
         let filterMode = 'all'; // 'all', 'local', 'with-apikey', 'without-apikey'
 
+        // 前端配置缓存
+        let clientConfig = {
+            concurrency: 10,
+            registerDelay: 1000
+        };
+
         const $statusBadge = $('#statusBadge');
         const $startRegisterBtn = $('#startRegisterBtn');
         const $stopRegisterBtn = $('#stopRegisterBtn');
@@ -1917,6 +1915,12 @@ const HTML_PAGE = `<!DOCTYPE html>
             });
 
             $('#toastContainer').append($toast);
+
+            // 限制最多保留3条通知，超过则移除最旧的
+            const $toasts = $('#toastContainer').children();
+            if ($toasts.length > 3) {
+                $toasts.first().remove();
+            }
 
             setTimeout(() => {
                 $toast.removeClass('toast-enter').addClass('toast-exit');
@@ -2196,7 +2200,7 @@ const HTML_PAGE = `<!DOCTYPE html>
                     $('#kvWarnings').text('✓ 正常').removeClass('text-orange-600 font-medium');
                 }
             } catch (error) {
-                console.error('加载KV统计失败:', error);
+                // 加载KV统计失败
             }
         }
 
@@ -2326,7 +2330,7 @@ const HTML_PAGE = `<!DOCTYPE html>
             let successCount = 0;
 
             // 获取并发数配置
-            const concurrency = registerConfig.concurrency || 10;
+            const concurrency = clientConfig.concurrency || 10;
             const total = selected.length;
 
             addLog('开始批量删除：' + total + ' 个账号，并发数：' + concurrency, 'info');
@@ -2345,7 +2349,6 @@ const HTML_PAGE = `<!DOCTYPE html>
                         }
                         return { success: false };
                     } catch (error) {
-                        console.error('删除失败:', acc.email, error);
                         return { success: false };
                     }
                 });
@@ -2474,6 +2477,11 @@ const HTML_PAGE = `<!DOCTYPE html>
                     throw new Error('HTTP ' + response.status);
                 }
                 const config = await response.json();
+
+                // 更新前端配置缓存
+                clientConfig.concurrency = config.concurrency || 10;
+                clientConfig.registerDelay = config.registerDelay || 1000;
+
                 $('#emailTimeout').val(config.emailTimeout);
                 $('#emailCheckInterval').val(config.emailCheckInterval || 6);
                 $('#registerDelay').val(config.registerDelay);
@@ -2486,7 +2494,6 @@ const HTML_PAGE = `<!DOCTYPE html>
                 $('#enableNotification').prop('checked', config.enableNotification);
                 $('#pushplusToken').val(config.pushplusToken || '');
             } catch (error) {
-                console.error('加载配置失败:', error);
                 showToast('加载配置失败', 'error');
             }
         }
@@ -2580,7 +2587,6 @@ const HTML_PAGE = `<!DOCTYPE html>
                     showToast('保存失败: ' + (result.error || '未知错误'), 'error');
                 }
             } catch (error) {
-                console.error('保存配置失败:', error);
                 showToast('保存失败: ' + error.message, 'error');
             }
         });
@@ -2734,7 +2740,6 @@ const HTML_PAGE = `<!DOCTYPE html>
                     addLog('✗ ' + (result.error || '启动失败'), 'error');
                 }
             } catch (error) {
-                console.error('启动注册失败:', error);
                 addLog('✗ 启动失败: ' + error.message, 'error');
                 showToast('启动失败: ' + error.message, 'error');
             }
@@ -2763,14 +2768,12 @@ const HTML_PAGE = `<!DOCTYPE html>
                 const request = indexedDB.open(DB_NAME, DB_VERSION);
 
                 request.onerror = () => {
-                    console.error('IndexedDB初始化失败:', request.error);
                     addLog('⚠️ 本地存储初始化失败', 'warning');
                     reject(request.error);
                 };
 
                 request.onsuccess = () => {
                     db = request.result;
-                    console.log('✓ IndexedDB初始化成功');
                     // loadAccounts() 会调用 loadLocalAccounts() 合并本地账号
                     resolve(db);
                 };
@@ -2783,7 +2786,6 @@ const HTML_PAGE = `<!DOCTYPE html>
                         store.createIndex('email', 'email', { unique: true });
                         store.createIndex('source', 'source', { unique: false });
                         store.createIndex('createdAt', 'createdAt', { unique: false });
-                        console.log('✓ 创建IndexedDB表结构');
                     }
                 };
             });
@@ -2792,7 +2794,6 @@ const HTML_PAGE = `<!DOCTYPE html>
         // 保存账号到 IndexedDB
         async function saveToLocal(account) {
             if (!db) {
-                console.warn('IndexedDB未初始化');
                 return false;
             }
 
@@ -2812,16 +2813,13 @@ const HTML_PAGE = `<!DOCTYPE html>
                 const request = store.add(accountData);
 
                 request.onsuccess = () => {
-                    console.log('✓ 账号已保存到本地:', account.email);
                     resolve(true);
                 };
 
                 request.onerror = () => {
                     if (request.error.name === 'ConstraintError') {
-                        console.log('⚠️ 账号已存在，跳过:', account.email);
                         resolve(false);
                     } else {
-                        console.error('保存失败:', request.error);
                         reject(request.error);
                     }
                 };
@@ -2846,7 +2844,6 @@ const HTML_PAGE = `<!DOCTYPE html>
         async function loadLocalAccounts() {
             try {
                 const localAccounts = await getAllLocalAccounts();
-                console.log(\`✓ 加载了 \${localAccounts.length} 个本地账号\`);
 
                 // 合并服务端账号和本地账号到accounts数组
                 // 使用Map去重（以email为key）
@@ -2885,7 +2882,7 @@ const HTML_PAGE = `<!DOCTYPE html>
                 // 重新渲染表格（保持当前过滤模式）
                 renderTable();
             } catch (error) {
-                console.error('加载本地账号失败:', error);
+                // 加载失败，静默处理
             }
         }
 
@@ -2912,7 +2909,6 @@ const HTML_PAGE = `<!DOCTYPE html>
 
                 showToast(\`已导出 \${localAccounts.length} 个本地账号\`, 'success');
             } catch (error) {
-                console.error('导出失败:', error);
                 showToast('导出失败: ' + error.message, 'error');
             }
         }
@@ -2947,7 +2943,6 @@ const HTML_PAGE = `<!DOCTYPE html>
                 await loadLocalAccounts();
                 showToast(\`导入完成！成功: \${imported}, 跳过: \${skipped}\`, 'success');
             } catch (error) {
-                console.error('导入失败:', error);
                 showToast('导入失败: ' + error.message, 'error');
             }
         }
@@ -2997,7 +2992,6 @@ const HTML_PAGE = `<!DOCTYPE html>
                     showToast(result.error || '同步失败', 'error');
                 }
             } catch (error) {
-                console.error('同步失败:', error);
                 showToast('同步失败: ' + error.message, 'error');
             }
         }
@@ -3043,7 +3037,6 @@ const HTML_PAGE = `<!DOCTYPE html>
                     return { success: false, error: result.error };
                 }
             } catch (error) {
-                console.error('获取APIKEY失败:', error);
                 showToast('✗ ' + email + ' 获取失败: ' + error.message, 'error');
                 return { success: false, error: error.message };
             }
@@ -3068,8 +3061,8 @@ const HTML_PAGE = `<!DOCTYPE html>
             const total = accountsWithoutKey.length;
 
             // 获取当前配置的并发数
-            const concurrency = registerConfig.concurrency || 10;
-            const delay = registerConfig.registerDelay || 1000;
+            const concurrency = clientConfig.concurrency || 10;
+            const delay = clientConfig.registerDelay || 1000;
 
             showToast('开始批量获取APIKEY，共 ' + total + ' 个账号（并发：' + concurrency + '）...', 'info');
             addLog('批量获取APIKEY：' + total + ' 个账号，并发数：' + concurrency, 'info');
@@ -3120,18 +3113,27 @@ const HTML_PAGE = `<!DOCTYPE html>
 
         // 批量检测账号存活性
         async function batchCheckAccounts() {
-            if (accounts.length === 0) {
+            // 优先检测选中的账号，如果没有选中则检测所有账号
+            const selectedAccounts = accounts.filter(acc => selectedEmails.has(acc.email));
+            const toCheck = selectedAccounts.length > 0 ? selectedAccounts : accounts;
+
+            if (toCheck.length === 0) {
                 showToast('暂无账号需要检测', 'info');
                 return;
             }
 
-            if (!confirm('确定要检测所有账号的存活性吗？这可能需要一些时间。')) {
+            const message = selectedAccounts.length > 0
+                ? '确定要检测选中的 ' + toCheck.length + ' 个账号的存活性吗？'
+                : '确定要检测所有 ' + toCheck.length + ' 个账号的存活性吗？';
+
+            if (!confirm(message)) {
                 return;
             }
 
-            const emails = accounts.map(acc => acc.email);
-            showToast('开始批量检测，共 ' + emails.length + ' 个账号...', 'info');
-            addLog('开始批量检测账号存活性...', 'info');
+            const emails = toCheck.map(acc => acc.email);
+            const scope = selectedAccounts.length > 0 ? '选中' : '全部';
+            showToast('开始批量检测' + scope + ' ' + emails.length + ' 个账号...', 'info');
+            addLog('开始批量检测' + scope + '账号存活性...', 'info');
 
             try {
                 const response = await fetch('/api/check-accounts', {
@@ -3155,7 +3157,6 @@ const HTML_PAGE = `<!DOCTYPE html>
                     showToast('检测失败: ' + result.error, 'error');
                 }
             } catch (error) {
-                console.error('批量检测失败:', error);
                 showToast('批量检测失败: ' + error.message, 'error');
             }
         }
@@ -3189,7 +3190,6 @@ const HTML_PAGE = `<!DOCTYPE html>
                     showToast('删除失败: ' + result.error, 'error');
                 }
             } catch (error) {
-                console.error('删除失效账号失败:', error);
                 showToast('删除失败: ' + error.message, 'error');
             }
         }
@@ -3235,7 +3235,6 @@ const HTML_PAGE = `<!DOCTYPE html>
                             addLog(\`💾 账号已保存到本地存储: \${data.account.email}\`, 'warning');
                             loadLocalAccounts(); // 更新本地账号统计
                         }).catch(err => {
-                            console.error('保存到本地失败:', err);
                             addLog(\`❌ 本地保存失败: \${data.account.email}\`, 'error');
                         });
                         break;
@@ -3283,7 +3282,6 @@ async function handler(req: Request): Promise<Response> {
     // 检查 IP 是否被锁定
     const lockCheck = checkIPLocked(clientIP);
     if (lockCheck.locked) {
-      console.log(`🚫 IP ${clientIP} 尝试登录但已被锁定，剩余 ${lockCheck.remainingTime} 秒`);
       return new Response(JSON.stringify({
         success: false,
         error: `登录失败次数过多，账号已被锁定`,
@@ -3329,7 +3327,6 @@ async function handler(req: Request): Promise<Response> {
         });
       }
 
-      console.log(`✅ IP ${clientIP} 登录成功`);
       return new Response(JSON.stringify({ success: true, sessionId }), {
         headers: { "Content-Type": "application/json" }
       });
@@ -3338,7 +3335,6 @@ async function handler(req: Request): Promise<Response> {
     // 登录失败，记录失败次数
     recordLoginFailure(clientIP);
     const attempts = loginAttempts.get(clientIP)?.attempts || 0;
-    console.log(`❌ IP ${clientIP} 登录失败（第 ${attempts} 次）`);
 
     return new Response(JSON.stringify({
       success: false,
@@ -3467,11 +3463,9 @@ async function handler(req: Request): Promise<Response> {
 
   // SSE
   if (url.pathname === "/events") {
-    console.log(`🔌 新的 SSE 连接建立，当前客户端数: ${sseClients.size + 1}`);
     const stream = new ReadableStream({
       start(controller) {
         sseClients.add(controller);
-        console.log(`✓ SSE 客户端已添加到连接池，isRunning=${isRunning}`);
         // 发送当前状态
         const message = `data: ${JSON.stringify({ type: 'connected', isRunning })}\n\n`;
         controller.enqueue(new TextEncoder().encode(message));
