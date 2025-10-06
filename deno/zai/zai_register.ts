@@ -2325,21 +2325,41 @@ const HTML_PAGE = `<!DOCTYPE html>
             $(this).prop('disabled', true).text('删除中...');
             let successCount = 0;
 
-            for (const acc of selected) {
-                try {
-                    const response = await fetch('/api/accounts/' + encodeURIComponent(acc.email), {
-                        method: 'DELETE'
-                    });
-                    if (response.ok) {
-                        successCount++;
-                        selectedEmails.delete(acc.email);
+            // 获取并发数配置
+            const concurrency = registerConfig.concurrency || 10;
+            const total = selected.length;
+
+            addLog('开始批量删除：' + total + ' 个账号，并发数：' + concurrency, 'info');
+
+            // 并发删除
+            for (let i = 0; i < selected.length; i += concurrency) {
+                const batch = selected.slice(i, i + concurrency);
+                const batchPromises = batch.map(async (acc) => {
+                    try {
+                        const response = await fetch('/api/accounts/' + encodeURIComponent(acc.email), {
+                            method: 'DELETE'
+                        });
+                        if (response.ok) {
+                            selectedEmails.delete(acc.email);
+                            return { success: true };
+                        }
+                        return { success: false };
+                    } catch (error) {
+                        console.error('删除失败:', acc.email, error);
+                        return { success: false };
                     }
-                } catch (error) {
-                    console.error('删除失败:', acc.email, error);
-                }
+                });
+
+                const results = await Promise.allSettled(batchPromises);
+                results.forEach(result => {
+                    if (result.status === 'fulfilled' && result.value.success) {
+                        successCount++;
+                    }
+                });
             }
 
             showToast('成功删除 ' + successCount + '/' + selected.length + ' 个账号', 'success');
+            addLog('批量删除完成：成功 ' + successCount + '/' + total, 'info');
             $(this).prop('disabled', false).text('🗑️ 批量删除');
             await loadAccounts();
             renderTable();
