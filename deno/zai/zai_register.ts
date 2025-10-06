@@ -475,10 +475,11 @@ async function createApiKey(accessToken: string, orgId: string, projectId: strin
   };
 
   try {
+    const randomName = 'key_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
     const response = await fetch(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ name: 'auto_generated_key' }),
+      body: JSON.stringify({ name: randomName }),
       signal: AbortSignal.timeout(30000)  // 30秒超时
     });
 
