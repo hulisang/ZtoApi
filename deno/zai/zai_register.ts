@@ -499,13 +499,18 @@ async function createApiKey(accessToken: string, orgId: string, projectId: strin
   }
 }
 
+// 清理Token：移除可能混入的APIKEY部分
+function cleanToken(token: string): string {
+  return token.includes('----') ? token.split('----')[0].trim() : token.trim();
+}
+
 /**
  * 检查账号Token是否有效
  * 通过尝试登录API来验证token
  */
 async function checkAccountStatus(token: string): Promise<boolean> {
   try {
-    const accessToken = await loginToApi(token);
+    const accessToken = await loginToApi(cleanToken(token));
     return accessToken !== null;
   } catch (error) {
     return false;
@@ -3070,7 +3075,7 @@ async function handler(req: Request): Promise<Response> {
       }
 
       // 尝试使用Token快速获取APIKEY
-      const accessToken = await loginToApi(token);
+      const accessToken = await loginToApi(cleanToken(token));
       if (!accessToken) {
         return new Response(JSON.stringify({
           success: false,
