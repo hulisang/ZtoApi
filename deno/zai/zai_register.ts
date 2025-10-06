@@ -196,11 +196,15 @@ function clearLoginFailure(ip: string): void {
 
 // 注册配置
 let registerConfig = {
-  emailTimeout: 120,  // 邮件超时秒
-  emailCheckInterval: 1,  // 轮询间隔秒
-  registerDelay: 2000,  // 间隔毫秒
-  retryTimes: 3,  // 重试次数
-  concurrency: 10,  // 并发1-10
+  emailTimeout: 300,  // 邮件检查超时(秒) - 对应EMAIL_CHECK_TIMEOUT
+  emailCheckInterval: 6,  // 邮件检查间隔(秒) - 对应EMAIL_CHECK_INTERVAL
+  registerDelay: 1000,  // 注册间隔(毫秒) - 对应RETRY_DELAY*1000
+  retryTimes: 3,  // 重试次数 - 对应MAX_RETRIES
+  concurrency: 50,  // 最大并发数 - 对应MAX_CONCURRENCY (1-100)
+  targetAccounts: 1000000,  // 目标注册账户数量 - 对应TARGET_ACCOUNTS
+  httpTimeout: 30,  // HTTP请求超时(秒) - 对应HTTP_TIMEOUT
+  batchSaveSize: 10,  // 批量保存大小 - 对应BATCH_SAVE_SIZE
+  connectionPoolSize: 100,  // 连接池大小 - 对应CONNECTION_POOL_SIZE
   enableNotification: false,  // 通知默认关
   pushplusToken: "",  // PushPlus Token
 };
