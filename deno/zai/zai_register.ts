@@ -1143,9 +1143,70 @@ const LOGIN_PAGE = `<!DOCTYPE html>
       <p>📦 <a href="https://github.com/dext7r/ZtoApi/tree/main/deno/zai/zai_register.ts" target="_blank" class="text-cyan-600 underline">源码地址 (GitHub)</a> |
       💬 <a href="https://linux.do/t/topic/1009939" target="_blank" class="text-cyan-600 underline">交流讨论</a></p>
     </div>
+
+    <!-- 公开KV统计 -->
+    <div class="mt-6 p-4 bg-gray-50 rounded-xl border border-gray-200">
+        <h3 class="text-sm font-semibold text-gray-700 mb-3 text-center">📊 系统状态</h3>
+        <div class="grid grid-cols-2 gap-3 text-xs">
+            <div class="text-center">
+                <div class="text-gray-500 mb-1">今日写入</div>
+                <div class="font-bold text-gray-800" id="publicKvWrites">-</div>
+                <div class="text-gray-400 text-[10px]" id="publicKvWritesPercent">-</div>
+            </div>
+            <div class="text-center">
+                <div class="text-gray-500 mb-1">今日读取</div>
+                <div class="font-bold text-gray-800" id="publicKvReads">-</div>
+                <div class="text-gray-400 text-[10px]" id="publicKvReadsPercent">-</div>
+            </div>
+            <div class="text-center col-span-2">
+                <div class="text-gray-500 mb-1">服务运行</div>
+                <div class="font-bold text-gray-800" id="publicKvUptime">-</div>
+            </div>
+            <div class="text-center col-span-2">
+                <div class="inline-flex items-center px-3 py-1 rounded-full text-[10px] font-medium" id="publicKvStatus">
+                    <span class="w-2 h-2 bg-green-500 rounded-full mr-2 animate-pulse"></span>
+                    <span>系统正常运行</span>
+                </div>
+            </div>
+        </div>
+    </div>
     </div>
 
     <script>
+        // 加载公开KV统计
+        async function loadPublicKVStats() {
+            try {
+                const response = await fetch('/api/kv-stats');
+                const stats = await response.json();
+
+                // 更新UI
+                document.getElementById('publicKvWrites').textContent = stats.daily.writes.toLocaleString();
+                document.getElementById('publicKvReads').textContent = stats.daily.reads.toLocaleString();
+                document.getElementById('publicKvWritesPercent').textContent = stats.quota.writesPercent;
+                document.getElementById('publicKvReadsPercent').textContent = stats.quota.readsPercent;
+                document.getElementById('publicKvUptime').textContent = stats.session.uptime;
+
+                // 更新状态
+                const statusEl = document.getElementById('publicKvStatus');
+                if (stats.warnings && stats.warnings.length > 0) {
+                    statusEl.className = 'inline-flex items-center px-3 py-1 rounded-full text-[10px] font-medium bg-orange-100 text-orange-700';
+                    statusEl.innerHTML = '<span class="w-2 h-2 bg-orange-500 rounded-full mr-2 animate-pulse"></span><span>配额使用较高</span>';
+                } else {
+                    statusEl.className = 'inline-flex items-center px-3 py-1 rounded-full text-[10px] font-medium bg-green-100 text-green-700';
+                    statusEl.innerHTML = '<span class="w-2 h-2 bg-green-500 rounded-full mr-2 animate-pulse"></span><span>系统正常运行</span>';
+                }
+            } catch (error) {
+                console.error('加载KV统计失败:', error);
+                document.getElementById('publicKvStatus').innerHTML = '<span class="w-2 h-2 bg-gray-400 rounded-full mr-2"></span><span>统计加载失败</span>';
+            }
+        }
+
+        // 页面加载时获取统计
+        loadPublicKVStats();
+
+        // 每30秒刷新一次
+        setInterval(loadPublicKVStats, 30000);
+
         document.getElementById('loginForm').addEventListener('submit', async (e) => {
             e.preventDefault();
 
