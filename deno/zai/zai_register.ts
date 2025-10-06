@@ -3047,30 +3047,55 @@ const HTML_PAGE = `<!DOCTYPE html>
             let failedCount = 0;
             const total = accountsWithoutKey.length;
 
-            showToast('开始批量获取APIKEY，共 ' + total + ' 个账号...', 'info');
+            // 获取当前配置的并发数
+            const concurrency = registerConfig.concurrency || 10;
+            const delay = registerConfig.registerDelay || 1000;
 
-            for (let i = 0; i < accountsWithoutKey.length; i++) {
-                const acc = accountsWithoutKey[i];
-                addLog('[' + (i + 1) + '/' + total + '] 正在为 ' + acc.email + ' 获取APIKEY...', 'info');
+            showToast('开始批量获取APIKEY，共 ' + total + ' 个账号（并发：' + concurrency + '）...', 'info');
+            addLog('批量获取APIKEY：' + total + ' 个账号，并发数：' + concurrency, 'info');
 
-                const result = await refetchSingleApikey(acc.email, acc.token);
+            // 并发处理
+            for (let i = 0; i < accountsWithoutKey.length; i += concurrency) {
+                const batch = accountsWithoutKey.slice(i, i + concurrency);
+                const batchPromises = batch.map(async (acc, idx) => {
+                    const globalIdx = i + idx;
+                    addLog('[' + (globalIdx + 1) + '/' + total + '] 正在为 ' + acc.email + ' 获取APIKEY...', 'info');
 
-                if (result.success) {
-                    successCount++;
-                    addLog('  ✓ ' + acc.email + ' 成功', 'success');
-                } else {
-                    failedCount++;
-                    addLog('  ✗ ' + acc.email + ' 失败: ' + result.error, 'error');
-                }
+                    const result = await refetchSingleApikey(acc.email, acc.token);
 
-                // 每个请求之间延迟1秒，避免过快
-                if (i < accountsWithoutKey.length - 1) {
-                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    if (result.success) {
+                        addLog('  ✓ ' + acc.email + ' 成功', 'success');
+                        return { success: true };
+                    } else {
+                        addLog('  ✗ ' + acc.email + ' 失败: ' + result.error, 'error');
+                        return { success: false };
+                    }
+                });
+
+                // 等待当前批次完成
+                const results = await Promise.allSettled(batchPromises);
+
+                // 统计结果
+                results.forEach(result => {
+                    if (result.status === 'fulfilled' && result.value.success) {
+                        successCount++;
+                    } else {
+                        failedCount++;
+                    }
+                });
+
+                // 批次之间延迟
+                if (i + concurrency < accountsWithoutKey.length) {
+                    await new Promise(resolve => setTimeout(resolve, delay));
                 }
             }
 
             showToast('批量获取完成！成功 ' + successCount + ' 个，失败 ' + failedCount + ' 个',
                       successCount > 0 ? 'success' : 'error');
+            addLog('批量获取APIKEY完成：成功 ' + successCount + '，失败 ' + failedCount, 'info');
+
+            // 刷新账号列表
+            await loadAccounts();
         }
 
         // 批量检测账号存活性
