@@ -488,6 +488,12 @@ async function fetchVerificationEmail(email: string): Promise<string | null> {
   };
 
   while (Date.now() - startTime < actualTimeout * 1000) {
+    // 检查是否被停止
+    if (shouldStop) {
+      broadcast({ type: 'log', level: 'warning', message: `  ⚠️ 任务已停止，中断邮件等待` });
+      return null;
+    }
+
     attempts++;
     try {
       const response = await fetch(apiUrl, { signal: AbortSignal.timeout(10000) });
@@ -701,6 +707,11 @@ interface RegisterResult {
 
 async function registerAccount(): Promise<RegisterResult> {
   try {
+    // 检查是否被停止
+    if (shouldStop) {
+      return { success: false };
+    }
+
     const email = createEmail();
     const password = createPassword();
     const name = email.split("@")[0];
@@ -747,6 +758,11 @@ async function registerAccount(): Promise<RegisterResult> {
     const emailContent = await fetchVerificationEmail(email);
     if (!emailContent) {
       stats.failed++;
+      return { success: false };
+    }
+
+    // 再次检查是否被停止
+    if (shouldStop) {
       return { success: false };
     }
 
@@ -1050,6 +1066,26 @@ async function batchRegister(count: number): Promise<void> {
     }
 
     completed += batchSize;
+
+    // 批次完成后显示详细统计
+    const currentBatch = Math.ceil(completed / concurrency);
+    const totalBatches = Math.ceil(count / concurrency);
+    const elapsed = Math.floor((Date.now() - stats.startTime) / 1000);
+    const progress = Math.floor((completed / count) * 100);
+    const successRate = completed > 0 ? Math.floor((stats.success / completed) * 100) : 0;
+
+    const formatTime = (seconds: number): string => {
+      if (seconds < 60) return `${seconds}秒`;
+      const mins = Math.floor(seconds / 60);
+      const secs = seconds % 60;
+      return `${mins}分${secs}秒`;
+    };
+
+    broadcast({
+      type: 'log',
+      level: 'info',
+      message: `\n📊 批次 ${currentBatch}/${totalBatches} 完成 | 进度: ${completed}/${count} (${progress}%) | 成功率: ${successRate}% | 耗时: ${formatTime(elapsed)}`
+    });
 
     // 批次延迟
     if (completed < count && !shouldStop) {
