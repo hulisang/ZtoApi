@@ -98,7 +98,8 @@ let shouldStop = false;  // 停止标志
 const sseClients = new Set<ReadableStreamDefaultController>();  // SSE连接
 let stats = { success: 0, failed: 0, startTime: 0, lastNotifyTime: 0 };  // 统计
 const logHistory: any[] = [];  // 日志缓存
-const MAX_LOG_HISTORY = 500;  // 最大日志数
+const MAX_LOG_HISTORY = 500;  // 最大内存日志数
+const MAX_KV_LOG_HISTORY = 50;  // 最大KV日志数（限制64KB）
 let logSaveTimer: number | null = null;  // 日志定时器
 const LOG_SAVE_INTERVAL = 30000;  // 保存间隔30秒
 
@@ -111,13 +112,17 @@ async function saveLogs(): Promise<void> {
 
   try {
     const logKey = ["logs", "recent"];
-    const now = Date.now();
 
-    // 保存1小时内日志
-    const oneHourAgo = now - 3600000;
+    // 保存最近的50条日志（限制大小避免超过64KB）
     const recentLogs = logHistory
-      .filter(log => log.timestamp > oneHourAgo)
-      .slice(-200);
+      .slice(-MAX_KV_LOG_HISTORY)
+      .map(log => ({
+        type: log.type,
+        level: log.level,
+        message: log.message,
+        timestamp: log.timestamp
+        // 移除stats和link等大对象，减小存储体积
+      }));
 
     if (recentLogs.length > 0) {
       await kvSet(logKey, recentLogs, { expireIn: 3600000 });  // 1小时过期
@@ -3879,6 +3884,31 @@ async function handler(req: Request): Promise<Response> {
 
     shouldStop = true;
     return new Response(JSON.stringify({ success: true }), { headers: { "Content-Type": "application/json" } });
+  }
+
+  // 清理日志
+  if (url.pathname === "/api/clear-logs" && req.method === "POST") {
+    try {
+      // 清空内存日志
+      logHistory.length = 0;
+
+      // 删除KV中的日志
+      await kvDelete(["logs", "recent"]);
+
+      return new Response(JSON.stringify({
+        success: true,
+        message: "日志已清理"
+      }), {
+        headers: { "Content-Type": "application/json" }
+      });
+    } catch (error) {
+      return new Response(JSON.stringify({
+        error: "清理日志失败: " + String(error)
+      }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
   }
 
   // 重新获取APIKEY（单个账号）
