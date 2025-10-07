@@ -3593,19 +3593,18 @@ async function handler(req: Request): Promise<Response> {
     const url_obj = new URL(req.url);
     const page = parseInt(url_obj.searchParams.get('page') || '1');
     const pageSize = parseInt(url_obj.searchParams.get('pageSize') || '100');
-    const offset = (page - 1) * pageSize;
 
-    const accounts = [];
-    let total = 0;
-
-    // 先获取总数
-    const allEntries = kv.list({ prefix: ["zai_accounts"] });
-    for await (const entry of allEntries) {
-      if (total >= offset && accounts.length < pageSize) {
-        accounts.push(entry.value);
-      }
-      total++;
+    // 获取所有账号（倒序）
+    const allAccounts: any[] = [];
+    const entries = kv.list({ prefix: ["zai_accounts"] }, { reverse: true });
+    for await (const entry of entries) {
+      allAccounts.push(entry.value);
     }
+
+    const total = allAccounts.length;
+    const start = (page - 1) * pageSize;
+    const end = start + pageSize;
+    const accounts = allAccounts.slice(start, end);
 
     return new Response(JSON.stringify({
       accounts,
