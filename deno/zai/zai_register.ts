@@ -3583,7 +3583,8 @@ async function handler(req: Request): Promise<Response> {
   // 账号列表
   if (url.pathname === "/api/accounts") {
     const accounts = [];
-    const entries = kv.list({ prefix: ["zai_accounts"] }, { reverse: true });
+    // 限制最多返回1000个账号，避免数据过多导致查询缓慢
+    const entries = kv.list({ prefix: ["zai_accounts"] }, { reverse: true, limit: 1000 });
     for await (const entry of entries) {
       accounts.push(entry.value);
     }
@@ -3593,7 +3594,8 @@ async function handler(req: Request): Promise<Response> {
   // 导出
   if (url.pathname === "/api/export") {
     const lines: string[] = [];
-    const entries = kv.list({ prefix: ["zai_accounts"] });
+    // 限制最多导出10000个账号，避免数据过多导致超时
+    const entries = kv.list({ prefix: ["zai_accounts"] }, { limit: 10000 });
     for await (const entry of entries) {
       const data = entry.value as any;
       // 支持四字段格式：账号----密码----Token----APIKEY
@@ -3904,6 +3906,60 @@ async function handler(req: Request): Promise<Response> {
     } catch (error) {
       return new Response(JSON.stringify({
         error: "清理日志失败: " + String(error)
+      }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+  }
+
+  // 清理旧账号数据（保留最新N个）
+  if (url.pathname === "/api/cleanup-accounts" && req.method === "POST") {
+    try {
+      const body = await req.json();
+      const keepCount = body.keepCount || 1000;  // 默认保留最新1000个
+
+      // 获取所有账号
+      const allAccounts: { key: any; value: any }[] = [];
+      const entries = kv.list({ prefix: ["zai_accounts"] }, { reverse: true });
+      for await (const entry of entries) {
+        allAccounts.push({ key: entry.key, value: entry.value });
+      }
+
+      const totalCount = allAccounts.length;
+
+      if (totalCount <= keepCount) {
+        return new Response(JSON.stringify({
+          success: true,
+          message: '当前账号数量(' + totalCount + ')未超过保留数量(' + keepCount + ')，无需清理',
+          total: totalCount,
+          deleted: 0
+        }), {
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      // 保留最新的 keepCount 个，删除其余的
+      const toDelete = allAccounts.slice(keepCount);
+      let deleted = 0;
+
+      for (const item of toDelete) {
+        await kvDelete(item.key);
+        deleted++;
+      }
+
+      return new Response(JSON.stringify({
+        success: true,
+        message: '清理完成：保留' + keepCount + '个，删除' + deleted + '个旧账号',
+        total: totalCount,
+        kept: keepCount,
+        deleted: deleted
+      }), {
+        headers: { "Content-Type": "application/json" }
+      });
+    } catch (error) {
+      return new Response(JSON.stringify({
+        error: "清理账号失败: " + String(error)
       }), {
         status: 500,
         headers: { "Content-Type": "application/json" }
