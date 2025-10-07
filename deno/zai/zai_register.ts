@@ -116,15 +116,24 @@ async function getAccountTotal(forceRefresh = false): Promise<number> {
 
   // 检查缓存
   if (!forceRefresh && accountTotalCache && (now - accountTotalCache.lastUpdate < ACCOUNT_COUNT_CACHE_TTL)) {
+    console.log(`📊 使用缓存的账号总数: ${accountTotalCache.count}`);
     return accountTotalCache.count;
   }
 
   // 重新统计
+  console.log(`📊 开始统计账号总数...`);
+  const startTime = Date.now();
   let count = 0;
   const entries = kv.list({ prefix: ["zai_accounts"] });
   for await (const _ of entries) {
     count++;
+    // 每1000条打印一次进度
+    if (count % 1000 === 0) {
+      console.log(`  ... 已统计 ${count} 条`);
+    }
   }
+  const elapsed = Date.now() - startTime;
+  console.log(`✅ 账号总数统计完成: ${count} 条 (耗时: ${elapsed}ms)`);
 
   // 更新缓存
   accountTotalCache = { count, lastUpdate: now };
@@ -1939,6 +1948,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 
     <script>
         let accounts = [];
+        let totalAccountsFromServer = 0;  // 服务器返回的真实总数
         let filteredAccounts = [];
         let selectedEmails = new Set(); // 存储选中的账号邮箱
         let quickFilterMode = null; // 快速筛选模式
@@ -2281,9 +2291,14 @@ const HTML_PAGE = `<!DOCTYPE html>
             accounts = data.accounts || [];
             filteredAccounts = accounts;
 
-            // 显示总数（包括分页信息）
-            if (data.pagination) {
-                $totalAccounts.text(data.pagination.total + ' (当前页: ' + accounts.length + ')');
+            // 保存服务器返回的真实总数
+            if (data.pagination && data.pagination.total) {
+                totalAccountsFromServer = data.pagination.total;
+            }
+
+            // 显示总数（使用服务器的真实总数）
+            if (totalAccountsFromServer > 0) {
+                $totalAccounts.text(totalAccountsFromServer + ' (当前加载: ' + accounts.length + ')');
             } else {
                 $totalAccounts.text(accounts.length);
             }
@@ -2989,8 +3004,12 @@ const HTML_PAGE = `<!DOCTYPE html>
                 accounts = Array.from(accountMap.values());
                 filteredAccounts = accounts;
 
-                // 更新统计
-                $totalAccounts.text(accounts.length);
+                // 更新统计（使用服务器的真实总数，如果有的话）
+                if (totalAccountsFromServer > 0) {
+                    $totalAccounts.text(totalAccountsFromServer + ' (当前加载: ' + accounts.length + ')');
+                } else {
+                    $totalAccounts.text(accounts.length);
+                }
                 $('#localAccountsCount').text(accounts.filter(a => a.source === 'local').length);
                 $('#withApikeyCount').text(accounts.filter(a => a.apikey).length);
                 $('#withoutApikeyCount').text(accounts.filter(a => !a.apikey).length);
