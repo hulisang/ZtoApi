@@ -103,8 +103,38 @@ const MAX_KV_LOG_HISTORY = 50;  // 最大KV日志数（限制64KB）
 let logSaveTimer: number | null = null;  // 日志定时器
 const LOG_SAVE_INTERVAL = 30000;  // 保存间隔30秒
 
+// 账号总数缓存
+let accountTotalCache: { count: number; lastUpdate: number } | null = null;
+const ACCOUNT_COUNT_CACHE_TTL = 60000;  // 缓存1分钟
+
 // 登录失败跟踪
 const loginAttempts = new Map<string, { attempts: number; lockedUntil: number }>();
+
+// 获取账号总数（带缓存）
+async function getAccountTotal(forceRefresh = false): Promise<number> {
+  const now = Date.now();
+
+  // 检查缓存
+  if (!forceRefresh && accountTotalCache && (now - accountTotalCache.lastUpdate < ACCOUNT_COUNT_CACHE_TTL)) {
+    return accountTotalCache.count;
+  }
+
+  // 重新统计
+  let count = 0;
+  const entries = kv.list({ prefix: ["zai_accounts"] });
+  for await (const _ of entries) {
+    count++;
+  }
+
+  // 更新缓存
+  accountTotalCache = { count, lastUpdate: now };
+  return count;
+}
+
+// 清除账号总数缓存（在新增/删除账号时调用）
+function clearAccountTotalCache() {
+  accountTotalCache = null;
+}
 
 // 批量保存日志(节流)
 async function saveLogs(): Promise<void> {
@@ -687,6 +717,8 @@ async function saveAccount(email: string, password: string, token: string, apike
     });
     // 清除邮箱缓存
     invalidateEmailCache();
+    // 清除账号总数缓存
+    clearAccountTotalCache();
     return true;
   } catch (error) {
     console.error("❌ KV保存失败:", error);
@@ -3594,17 +3626,25 @@ async function handler(req: Request): Promise<Response> {
     const page = parseInt(url_obj.searchParams.get('page') || '1');
     const pageSize = parseInt(url_obj.searchParams.get('pageSize') || '100');
 
-    // 获取所有账号（倒序）
-    const allAccounts: any[] = [];
+    // 快速获取总数（使用缓存）
+    const total = await getAccountTotal();
+
+    // 只获取当前页需要的数据
+    const accounts: any[] = [];
+    const skip = (page - 1) * pageSize;
+    let index = 0;
+
     const entries = kv.list({ prefix: ["zai_accounts"] }, { reverse: true });
     for await (const entry of entries) {
-      allAccounts.push(entry.value);
+      if (index >= skip && accounts.length < pageSize) {
+        accounts.push(entry.value);
+      }
+      index++;
+      // 提前退出优化：已经收集够了就不再遍历
+      if (accounts.length >= pageSize) {
+        break;
+      }
     }
-
-    const total = allAccounts.length;
-    const start = (page - 1) * pageSize;
-    const end = start + pageSize;
-    const accounts = allAccounts.slice(start, end);
 
     return new Response(JSON.stringify({
       accounts,
@@ -3973,6 +4013,9 @@ async function handler(req: Request): Promise<Response> {
         await kvDelete(item.key);
         deleted++;
       }
+
+      // 清除账号总数缓存
+      clearAccountTotalCache();
 
       return new Response(JSON.stringify({
         success: true,
