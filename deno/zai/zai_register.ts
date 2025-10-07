@@ -2244,10 +2244,18 @@ const HTML_PAGE = `<!DOCTYPE html>
 
 
         async function loadAccounts() {
-            const response = await fetch('/api/accounts');
-            accounts = await response.json();
+            const response = await fetch('/api/accounts?page=1&pageSize=10000');
+            const data = await response.json();
+            accounts = data.accounts || [];
             filteredAccounts = accounts;
-            $totalAccounts.text(accounts.length);
+
+            // 显示总数（包括分页信息）
+            if (data.pagination) {
+                $totalAccounts.text(data.pagination.total + ' (当前页: ' + accounts.length + ')');
+            } else {
+                $totalAccounts.text(accounts.length);
+            }
+
             currentPage = 1;
 
             // 加载并合并本地账号
@@ -3582,13 +3590,32 @@ async function handler(req: Request): Promise<Response> {
 
   // 账号列表
   if (url.pathname === "/api/accounts") {
+    const url_obj = new URL(req.url);
+    const page = parseInt(url_obj.searchParams.get('page') || '1');
+    const pageSize = parseInt(url_obj.searchParams.get('pageSize') || '100');
+    const offset = (page - 1) * pageSize;
+
     const accounts = [];
-    // 限制最多返回1000个账号，避免数据过多导致查询缓慢
-    const entries = kv.list({ prefix: ["zai_accounts"] }, { reverse: true, limit: 1000 });
-    for await (const entry of entries) {
-      accounts.push(entry.value);
+    let total = 0;
+
+    // 先获取总数
+    const allEntries = kv.list({ prefix: ["zai_accounts"] });
+    for await (const entry of allEntries) {
+      if (total >= offset && accounts.length < pageSize) {
+        accounts.push(entry.value);
+      }
+      total++;
     }
-    return new Response(JSON.stringify(accounts), { headers: { "Content-Type": "application/json" } });
+
+    return new Response(JSON.stringify({
+      accounts,
+      pagination: {
+        page,
+        pageSize,
+        total,
+        totalPages: Math.ceil(total / pageSize)
+      }
+    }), { headers: { "Content-Type": "application/json" } });
   }
 
   // 导出
