@@ -1,0 +1,56 @@
+# ========================================
+# ZtoApi + ZAI Register 一体化镜像
+# 包含 API 服务和账号注册工具
+# 共享本地 Deno KV 数据库
+# ========================================
+
+# Build stage
+FROM denoland/deno:alpine AS builder
+WORKDIR /app
+
+# 复制所有必要文件
+COPY deno/zai/deno.json ./
+COPY deno/zai/main.ts ./
+COPY deno/zai/zai_register.ts ./
+
+# 缓存依赖
+RUN deno cache main.ts
+RUN deno cache zai_register.ts
+
+# Final stage
+FROM denoland/deno:alpine
+WORKDIR /app
+
+# 复制构建文件
+COPY --from=builder /app /app
+
+# 安装 bash（用于启动脚本）
+RUN apk add --no-cache bash
+
+# 复制启动脚本
+COPY docker-entrypoint.sh /app/
+RUN chmod +x /app/docker-entrypoint.sh
+
+# Labels
+LABEL maintainer="ZtoApi Contributors"
+LABEL description="ZAI API + Register Tool (Deno KV Shared)"
+LABEL version="3.0.0"
+
+# 暴露两个端口
+EXPOSE 9090 8001
+
+# 环境变量默认值
+ENV PORT=9090 \
+    MODEL_NAME=GLM-4.5 \
+    DEBUG_MODE=true \
+    DEFAULT_STREAM=true \
+    DASHBOARD_ENABLED=true \
+    ENABLE_THINKING=false \
+    ADMIN_USERNAME=admin \
+    ADMIN_PASSWORD=123456 \
+    ZAI_USERNAME=admin \
+    ZAI_PASSWORD=123456
+
+# 使用启动脚本同时运行两个服务
+CMD ["/app/docker-entrypoint.sh"]
+

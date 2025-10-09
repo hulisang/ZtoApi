@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  ztoapi-full:
+    build:
+      context: .
+      dockerfile: Dockerfile.deno.full
+    container_name: ztoapi-full
+    restart: unless-stopped
+    
+    ports:
+      - "9090:9090"   # API 服务
+      - "8001:8001"   # 注册工具
+    
+    environment:
+      # API 服务配置
+      - PORT=9090
+      - MODEL_NAME=GLM-4.5
+      - DEFAULT_KEY=sk-your-api-key-here
+      - DEBUG_MODE=true
+      - DEFAULT_STREAM=true
+      - DASHBOARD_ENABLED=true
+      - ENABLE_THINKING=false
+      
+      # Admin 面板配置
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=change-me-123456
+      - ADMIN_ENABLED=true
+      
+      # 注册工具配置
+      - ZAI_USERNAME=admin
+      - ZAI_PASSWORD=change-me-123456
+      
+      # 可选: 静态 Token 池（如果不用注册工具）
+      # - ZAI_TOKEN=token1|token2|token3
+    
+    volumes:
+      # 持久化 KV 数据库
+      - ztoapi-kv-data:/app/.deno-kv
+      # 持久化日志
+      - ztoapi-logs:/app/logs
+    
+    healthcheck:
+      test: ["CMD", "deno", "eval", "fetch('http://localhost:9090/v1/models').then(r => r.ok ? Deno.exit(0) : Deno.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    networks:
+      - ztoapi-network
+
+volumes:
+  ztoapi-kv-data:
+    name: ztoapi-kv-data
+    driver: local
+  ztoapi-logs:
+    name: ztoapi-logs
+    driver: local
+
+networks:
+  ztoapi-network:
+    name: ztoapi-network
+    driver: bridge
+

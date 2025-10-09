@@ -68,10 +68,12 @@ const STATIC_TOKEN_POOL_ENABLED = ZAI_TOKEN_ARRAY.length > 0;
 const KV_TOKEN_POOL_ENABLED = !!KV_URL;
 
 // Token acquisition priority (fallback cascade):
-// 1. X-ZAI-Token header (if provided)
+// 1. X-ZAI-Token header (if provided by client)
 // 2. Static Token Pool (ZAI_TOKEN environment variable)
-// 3. KV Token Pool (KV_URL database)
-// 4. Anonymous Token (auto-fetch from Z.ai)
+// 3. KV Token Pool (always enabled - local or remote database)
+//    - If KV_URL is set: use remote KV database (Deno Deploy)
+//    - If KV_URL is not set: use local KV database (shared with zai_register.ts)
+// 4. Anonymous Token (auto-fetch from Z.ai as last resort)
 
 // Thinking tags mode
 const THINK_TAGS_MODE = "strip"; // strip | think | raw
@@ -175,17 +177,20 @@ let kvTokenPool: Deno.Kv | null = null;
 
 // Initialize KV token pool connection
 async function initKVTokenPool() {
-  if (!KV_URL) {
-    debugLog("KV_URL not configured, skipping KV token pool initialization");
-    return;
-  }
-
   try {
-    kvTokenPool = await Deno.openKv(KV_URL);
-    debugLog(`KV token pool initialized: ${KV_URL}`);
+    if (KV_URL) {
+      // Use remote KV database (Deno Deploy)
+      kvTokenPool = await Deno.openKv(KV_URL);
+      debugLog(`KV token pool initialized with remote database: ${KV_URL}`);
+    } else {
+      // Use local KV database (shared with zai_register.ts)
+      kvTokenPool = await Deno.openKv();
+      debugLog("KV token pool initialized with local database");
+    }
   } catch (error) {
     console.error("Failed to initialize KV token pool:", error);
-    console.error("Will fall back to anonymous token mode");
+    console.error("Will fall back to static token pool or anonymous token mode");
+    kvTokenPool = null;
   }
 }
 
@@ -4220,9 +4225,8 @@ const tokenSources = [];
 if (STATIC_TOKEN_POOL_ENABLED) {
   tokenSources.push(`Static Pool (${ZAI_TOKEN_ARRAY.length} tokens)`);
 }
-if (KV_TOKEN_POOL_ENABLED) {
-  tokenSources.push(`KV Pool`);
-}
+// KV Pool is always enabled (local or remote)
+tokenSources.push(KV_URL ? `KV Pool (remote)` : `KV Pool (local)`);
 tokenSources.push(`Anonymous`);
 
 console.log(`🔑 Token strategy: ${tokenSources.join(" → ")} (fallback cascade)`);
