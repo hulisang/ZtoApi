@@ -65,14 +65,15 @@ const ORIGIN_BASE = "https://chat.z.ai";
 // Parse ZAI_TOKEN to support multiple tokens separated by |
 const ZAI_TOKEN_ARRAY = ZAI_TOKEN ? ZAI_TOKEN.split("|").map(t => t.trim()).filter(t => t.length > 0) : [];
 const STATIC_TOKEN_POOL_ENABLED = ZAI_TOKEN_ARRAY.length > 0;
-const KV_TOKEN_POOL_ENABLED = !!KV_URL;
+// KV Token Pool is always enabled (will be initialized as local or remote KV)
+// The actual availability is determined at runtime by kvTokenPool variable
 
 // Token acquisition priority (fallback cascade):
-// 1. X-ZAI-Token header (if provided by client)
-// 2. Static Token Pool (ZAI_TOKEN environment variable)
-// 3. KV Token Pool (always enabled - local or remote database)
+// 1. X-ZAI-Token header (if provided by client in request header)
+// 2. KV Token Pool (PRIORITY - always enabled, local or remote database)
 //    - If KV_URL is set: use remote KV database (Deno Deploy)
 //    - If KV_URL is not set: use local KV database (shared with zai_register.ts)
+// 3. Static Token Pool (ZAI_TOKEN environment variable, fallback)
 // 4. Anonymous Token (auto-fetch from Z.ai as last resort)
 
 // Thinking tags mode
@@ -215,28 +216,35 @@ async function getTokenFromKVPool(): Promise<string | null> {
   }
 
   try {
+    debugLog("Fetching accounts from KV database (prefix: zai_accounts)...");
+    
     // Fetch all accounts from KV
     const accounts: Array<{ email: string; password: string; token: string }> = [];
     const entries = kvTokenPool.list({ prefix: ["zai_accounts"] });
 
     for await (const entry of entries) {
       const data = entry.value as any;
+      debugLog(`Found KV entry: ${entry.key}, has token: ${!!data?.token}`);
       if (data && data.token) {
         accounts.push({ email: data.email, password: data.password, token: data.token });
       }
     }
 
+    debugLog(`Total accounts found in KV pool: ${accounts.length}`);
+    
     if (accounts.length === 0) {
-      debugLog("No accounts found in KV token pool");
+      debugLog("⚠️ KV pool is empty! Please add accounts via:");
+      debugLog("  1. Use zai_register.ts to register accounts");
+      debugLog("  2. Or use Admin panel to add accounts manually");
       return null;
     }
 
     // Randomly select an account
     const randomAccount = accounts[Math.floor(Math.random() * accounts.length)];
-    debugLog(`Selected token from KV pool: ${randomAccount.email} (${accounts.length} accounts available)`);
+    debugLog(`✓ Selected token from KV pool: ${randomAccount.email} (${accounts.length} accounts available)`);
     return randomAccount.token;
   } catch (error) {
-    console.error("Failed to get token from KV pool:", error);
+    console.error("❌ Failed to get token from KV pool:", error);
     return null;
   }
 }
@@ -1473,33 +1481,35 @@ async function handleChatCompletions(req: Request): Promise<Response> {
   };
 
   // Get auth token with fallback cascade
-  // Priority: X-ZAI-Token header > Static Token Pool > KV Token Pool > Anonymous Token
+  // Priority: X-ZAI-Token header > KV Token Pool > Static Token Pool > Anonymous Token
   const customZaiToken = req.headers.get("X-ZAI-Token");
   let authToken = customZaiToken || "";
 
-  // Fallback 1: Try static token pool (ZAI_TOKEN)
-  if (!authToken && STATIC_TOKEN_POOL_ENABLED) {
-    const staticToken = getTokenFromStaticPool();
-    if (staticToken) {
-      authToken = staticToken;
-      debugLog("Token obtained from static pool");
-    }
-  }
-
-  // Fallback 2: Try KV token pool
-  if (!authToken && KV_TOKEN_POOL_ENABLED) {
+  // Fallback 1: Try KV token pool (local or remote) - PRIORITY
+  if (!authToken && kvTokenPool) {
     try {
       const kvToken = await getTokenFromKVPool();
       if (kvToken) {
         authToken = kvToken;
-        debugLog("Token obtained from KV pool");
+        debugLog("✓ Token obtained from KV pool");
+      } else {
+        debugLog("⚠️ KV pool is empty, trying next fallback...");
       }
     } catch (e) {
-      debugLog("Failed to get token from KV pool:", e);
+      debugLog("❌ Failed to get token from KV pool:", e);
     }
   }
 
-  // Fallback 3: Try anonymous token
+  // Fallback 2: Try static token pool (ZAI_TOKEN)
+  if (!authToken && STATIC_TOKEN_POOL_ENABLED) {
+    const staticToken = getTokenFromStaticPool();
+    if (staticToken) {
+      authToken = staticToken;
+      debugLog("✓ Token obtained from static pool");
+    }
+  }
+
+  // Fallback 3: Try anonymous token (last resort)
   if (!authToken) {
     try {
       authToken = await getAnonymousToken();
@@ -4222,11 +4232,11 @@ console.log(`🧠 Thinking enabled: ${ENABLE_THINKING}`);
 
 // Token strategy logging (shows configured pools, fallback to anonymous if all fail)
 const tokenSources = [];
+// KV Pool is always enabled (local or remote) - PRIORITY
+tokenSources.push(KV_URL ? `KV Pool (remote)` : `KV Pool (local)`);
 if (STATIC_TOKEN_POOL_ENABLED) {
   tokenSources.push(`Static Pool (${ZAI_TOKEN_ARRAY.length} tokens)`);
 }
-// KV Pool is always enabled (local or remote)
-tokenSources.push(KV_URL ? `KV Pool (remote)` : `KV Pool (local)`);
 tokenSources.push(`Anonymous`);
 
 console.log(`🔑 Token strategy: ${tokenSources.join(" → ")} (fallback cascade)`);
