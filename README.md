@@ -582,4 +582,4 @@ go run main.go
 
 如有问题或建议，请通过以下方式联系：
 
-- 提交 [Issue](https://github.com/libaxuan/ZtoApi/issues)
+- 提交 [Issue](https://github.com/hulisang/ZtoApi/issues)

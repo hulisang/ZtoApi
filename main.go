@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hulisang/ZtoApi/register"
 )
 
 // 配置变量（从环境变量读取）
@@ -534,6 +536,19 @@ func main() {
 		http.HandleFunc("/dashboard/stats", handleDashboardStats)
 		http.HandleFunc("/dashboard/requests", handleDashboardRequests)
 		log.Printf("Dashboard已启用，访问地址: http://localhost%s/dashboard", PORT)
+	}
+
+	// 初始化注册管理系统
+	registerEnabled := getEnv("REGISTER_ENABLED", "true")
+	if registerEnabled == "true" || registerEnabled == "1" {
+		dbPath := getEnv("REGISTER_DB_PATH", "./data/zai2api.db")
+		if err := register.InitRegisterSystem(dbPath); err != nil {
+			log.Printf("❌ 注册系统初始化失败: %v", err)
+		} else {
+			// 注册路由
+			register.RegisterRoutes(http.DefaultServeMux)
+			log.Printf("🔐 注册管理: http://localhost%s/register/login", PORT)
+		}
 	}
 
 	log.Printf("OpenAI兼容API服务器启动在端口%s", PORT)

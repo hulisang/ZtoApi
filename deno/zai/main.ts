@@ -2531,7 +2531,7 @@ const playgroundHTML = `<!DOCTYPE html>
 
     <footer class="bg-white border-t mt-12 py-6">
         <div class="container mx-auto px-4 text-center text-gray-500 text-sm">
-            <p>Powered by <span class="font-semibold">Deno 🦕</span> | <a href="/" class="text-purple-600 hover:underline">返回首页</a> | <a href="https://github.com/libaxuan/ZtoApi" target="_blank" rel="noopener noreferrer" class="text-purple-600 hover:underline">⭐ GitHub</a></p>
+            <p>Powered by <span class="font-semibold">Deno 🦕</span> | <a href="/" class="text-purple-600 hover:underline">返回首页</a> | <a href="https://github.com/hulisang/ZtoApi" target="_blank" rel="noopener noreferrer" class="text-purple-600 hover:underline">⭐ GitHub</a></p>
         </div>
     </footer>
 
@@ -2912,7 +2912,7 @@ const deployHTML = `<!DOCTYPE html>
                     <span class="bg-purple-100 text-purple-700 rounded-full w-8 h-8 flex items-center justify-center font-bold mr-4 flex-shrink-0">1</span>
                     <div class="flex-1">
                         <h3 class="font-semibold text-gray-900 mb-2">Fork 仓库</h3>
-                        <p class="text-gray-600">前往 <a href="https://github.com/libaxuan/ZtoApi" target="_blank" class="text-purple-600 hover:underline">GitHub 仓库</a>，点击右上角的 Fork 按钮</p>
+                        <p class="text-gray-600">前往 <a href="https://github.com/hulisang/ZtoApi" target="_blank" class="text-purple-600 hover:underline">GitHub 仓库</a>，点击右上角的 Fork 按钮</p>
                     </div>
                 </div>
 
@@ -3170,7 +3170,7 @@ const homeHTML = `<!DOCTYPE html>
                         📦 源码地址
                     </a>
                     <span class="text-white/40">|</span>
-                    <a href="https://github.com/libaxuan/ZtoApi" target="_blank" rel="noopener noreferrer" class="hover:text-white transition-colors">
+                    <a href="https://github.com/hulisang/ZtoApi" target="_blank" rel="noopener noreferrer" class="hover:text-white transition-colors">
                         🔗 原仓库
                     </a>
                     <span class="text-white/40">|</span>
