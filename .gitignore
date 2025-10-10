@@ -4,7 +4,10 @@
 *.dll
 *.so
 *.dylib
+
+.cunzhi-memory/
 .cursor/
+z.ai2api_python/
 # Test binary, built with `go test -c`
 *.test
 

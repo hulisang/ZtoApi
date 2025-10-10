@@ -3,11 +3,14 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -65,18 +68,18 @@ const (
 
 // 系统配置常量
 const (
-	MAX_LIVE_REQUESTS     = 100 // 最多保留的实时请求记录数
-	AUTH_TOKEN_TIMEOUT    = 10  // 获取匿名token的超时时间（秒）
-	UPSTREAM_TIMEOUT      = 60  // 上游API调用超时时间（秒）
-	TOKEN_DISPLAY_LENGTH  = 10  // token显示时的截取长度
+	MAX_LIVE_REQUESTS      = 100        // 最多保留的实时请求记录数
+	AUTH_TOKEN_TIMEOUT     = 10         // 获取匿名token的超时时间（秒）
+	UPSTREAM_TIMEOUT       = 60         // 上游API调用超时时间（秒）
+	TOKEN_DISPLAY_LENGTH   = 10         // token显示时的截取长度
 	NANOSECONDS_TO_SECONDS = 1000000000 // 纳秒转秒的倍数
 )
 
 // 伪装前端头部（2025-09-30 更新：修复426错误）
 const (
-	X_FE_VERSION   = "prod-fe-1.0.94" // 更新：1.0.70 → 1.0.94
+	X_FE_VERSION   = "prod-fe-1.0.94"                                                                                                  // 更新：1.0.70 → 1.0.94
 	BROWSER_UA     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36" // 更新：Chrome 139 → 140
-	SEC_CH_UA      = "\"Chromium\";v=\"140\", \"Not=A?Brand\";v=\"24\", \"Google Chrome\";v=\"140\"" // 更新：Chrome 140
+	SEC_CH_UA      = "\"Chromium\";v=\"140\", \"Not=A?Brand\";v=\"24\", \"Google Chrome\";v=\"140\""                                   // 更新：Chrome 140
 	SEC_CH_UA_MOB  = "?0"
 	SEC_CH_UA_PLAT = "\"Windows\""
 	ORIGIN_BASE    = "https://chat.z.ai"
@@ -91,7 +94,7 @@ func initConfig() {
 	loadEnvFile(".env.local")
 	// 也尝试加载标准的 .env 文件
 	loadEnvFile(".env")
-	
+
 	UPSTREAM_URL = getEnv("UPSTREAM_URL", "https://chat.z.ai/api/chat/completions")
 	DEFAULT_KEY = getEnv("DEFAULT_KEY", "sk-your-key")
 	ZAI_TOKEN = getEnv("ZAI_TOKEN", "")
@@ -209,7 +212,7 @@ func loadEnvFile(filename string) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		
+
 		// 解析 KEY=VALUE 格式
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) == 2 {
@@ -360,7 +363,7 @@ func transformThinkingContent(s string) string {
 	s = strings.ReplaceAll(s, "<Full>", "")
 	s = strings.ReplaceAll(s, "</Full>", "")
 	s = strings.TrimSpace(s)
-	
+
 	switch THINK_TAGS_MODE {
 	case "think":
 		s = regexp.MustCompile(`<details[^>]*>`).ReplaceAllString(s, "<think>")
@@ -369,7 +372,7 @@ func transformThinkingContent(s string) string {
 		s = regexp.MustCompile(`<details[^>]*>`).ReplaceAllString(s, "")
 		s = strings.ReplaceAll(s, "</details>", "")
 	}
-	
+
 	// 处理每行前缀 "> "（包括起始位置）
 	s = strings.TrimPrefix(s, "> ")
 	s = strings.ReplaceAll(s, "\n> ", "\n")
@@ -423,6 +426,96 @@ func getAnonymousToken() (string, error) {
 		return "", fmt.Errorf("anon token empty")
 	}
 	return body.Token, nil
+}
+
+// urlsafeB64Decode 解码URL安全的base64字符串（自动添加padding）
+func urlsafeB64Decode(data string) ([]byte, error) {
+	// 添加必要的padding
+	padding := len(data) % 4
+	if padding > 0 {
+		data += strings.Repeat("=", 4-padding)
+	}
+	return base64.URLEncoding.DecodeString(data)
+}
+
+// decodeJWTPayload 解码JWT的payload部分（不验证签名）
+func decodeJWTPayload(token string) map[string]interface{} {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return map[string]interface{}{}
+	}
+
+	payloadBytes, err := urlsafeB64Decode(parts[1])
+	if err != nil {
+		return map[string]interface{}{}
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return map[string]interface{}{}
+	}
+
+	return payload
+}
+
+// extractUserIDFromToken 从JWT token中提取user_id
+func extractUserIDFromToken(token string) string {
+	if token == "" {
+		return "guest"
+	}
+
+	payload := decodeJWTPayload(token)
+
+	// 尝试多个可能的字段名
+	for _, key := range []string{"id", "user_id", "uid", "sub"} {
+		if val, ok := payload[key]; ok {
+			if strVal, ok := val.(string); ok && strVal != "" {
+				return strVal
+			}
+		}
+	}
+
+	return "guest"
+}
+
+// generateSignature 生成双层HMAC-SHA256签名
+// Layer1: derived_key = HMAC(secret, window_index)
+// Layer2: signature = HMAC(derived_key, canonical_string)
+// canonical_string = "requestId,<id>,timestamp,<ts>,user_id,<uid>|<msg>|<ts>"
+func generateSignature(messageText, requestID string, timestampMs int64, userID, secret string) string {
+	if secret == "" {
+		secret = "junjie"
+	}
+
+	// 构建规范字符串
+	r := fmt.Sprintf("%d", timestampMs)
+	e := fmt.Sprintf("requestId,%s,timestamp,%d,user_id,%s", requestID, timestampMs, userID)
+	canonicalString := fmt.Sprintf("%s|%s|%s", e, messageText, r)
+
+	// Layer1: 基于5分钟时间窗口生成派生密钥
+	windowIndex := timestampMs / (5 * 60 * 1000)
+	rootKey := []byte(secret)
+
+	mac1 := hmac.New(sha256.New, rootKey)
+	mac1.Write([]byte(fmt.Sprintf("%d", windowIndex)))
+	derivedHex := fmt.Sprintf("%x", mac1.Sum(nil))
+
+	// Layer2: 使用派生密钥对规范字符串签名
+	mac2 := hmac.New(sha256.New, []byte(derivedHex))
+	mac2.Write([]byte(canonicalString))
+	signature := fmt.Sprintf("%x", mac2.Sum(nil))
+
+	return signature
+}
+
+// extractLastUserMessage 提取最后一条用户消息的文本内容
+func extractLastUserMessage(messages []Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return messages[i].Content
+		}
+	}
+	return ""
 }
 
 func main() {
@@ -1555,16 +1648,37 @@ func callUpstreamWithHeaders(upstreamReq UpstreamRequest, refererChatID string, 
 
 	// 构建带URL参数的完整URL
 	baseURL := UPSTREAM_URL
-	timestamp := fmt.Sprintf("%d", time.Now().UnixMilli())
-	
+	timestampMs := time.Now().UnixMilli()
+	timestamp := fmt.Sprintf("%d", timestampMs)
+
 	// 生成UUID (简化版，使用crypto/rand会更好)
-	requestID := fmt.Sprintf("%x-%x-%x-%x-%x", 
-		time.Now().UnixNano(), time.Now().Unix(), 
+	requestID := fmt.Sprintf("%x-%x-%x-%x-%x",
+		time.Now().UnixNano(), time.Now().Unix(),
 		time.Now().Nanosecond(), time.Now().Second(), time.Now().Minute())
-	userID := fmt.Sprintf("%x-%x-%x-%x-%x",
-		time.Now().Unix(), time.Now().Nanosecond(),
-		time.Now().Second(), time.Now().Minute(), time.Now().Hour())
-	
+
+	// 从token中提取user_id（而不是随机生成）
+	userID := extractUserIDFromToken(authToken)
+
+	// 提取最后一条用户消息用于签名
+	lastUserMessage := extractLastUserMessage(upstreamReq.Messages)
+
+	// 获取签名密钥（从环境变量或使用默认值）
+	secret := getEnv("ZAI_SIGNING_SECRET", "junjie")
+
+	// 生成双层HMAC-SHA256签名
+	signature := generateSignature(lastUserMessage, requestID, timestampMs, userID, secret)
+
+	debugLog("签名参数 - user_id: %s, message: %s..., timestamp: %d",
+		userID,
+		func() string {
+			if len(lastUserMessage) > 20 {
+				return lastUserMessage[:20]
+			}
+			return lastUserMessage
+		}(),
+		timestampMs)
+	debugLog("生成签名: %s (双层HMAC-SHA256)", signature)
+
 	// 构建URL参数 - 添加所有必要的指纹参数
 	fullURL := fmt.Sprintf("%s?timestamp=%s&requestId=%s&user_id=%s&version=0.0.1&platform=web&token=%s"+
 		"&user_agent=%s&language=zh-CN&languages=zh-CN,zh&timezone=Asia/Shanghai"+
@@ -1595,12 +1709,6 @@ func callUpstreamWithHeaders(upstreamReq UpstreamRequest, refererChatID string, 
 		return nil, err
 	}
 
-	// 生成 X-Signature - 基于请求体的 SHA-256 哈希（426错误修复）
-	hash := sha256.Sum256(reqBody)
-	signature := fmt.Sprintf("%x", hash)
-	
-	debugLog("生成签名: %s (基于请求体SHA256)", signature)
-
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Accept-Language", "zh-CN")
@@ -1617,11 +1725,31 @@ func callUpstreamWithHeaders(upstreamReq UpstreamRequest, refererChatID string, 
 	req.Header.Set("Sec-Fetch-Dest", "empty")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	
+
 	// 添加Cookie
 	req.Header.Set("Cookie", fmt.Sprintf("token=%s", authToken))
 
-	client := &http.Client{Timeout: UPSTREAM_TIMEOUT * time.Second}
+	// 创建HTTP客户端 - 流式请求专用配置
+	// 不设置总超时(Timeout)，只设置连接和响应头超时
+	// 这样只要数据持续到达，连接就会保持，支持长时间思考
+	client := &http.Client{
+		Transport: &http.Transport{
+			// 连接超时：30秒
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			// 响应头超时：60秒（等待服务器开始响应）
+			ResponseHeaderTimeout: 60 * time.Second,
+			// TLS握手超时
+			TLSHandshakeTimeout: 10 * time.Second,
+			// 最大空闲连接
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+			// 不设置整体超时，让流式响应可以持续任意长时间
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		debugLog("上游请求失败: %v", err)
@@ -1851,9 +1979,9 @@ func handleNonStreamResponseWithIDs(w http.ResponseWriter, upstreamReq UpstreamR
 	for scanner.Scan() {
 		line := scanner.Text()
 		lineCount++
-		
+
 		debugLog("收到原始行[%d]: %s", lineCount, line)
-		
+
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
@@ -1871,8 +1999,8 @@ func handleNonStreamResponseWithIDs(w http.ResponseWriter, upstreamReq UpstreamR
 			continue
 		}
 
-		debugLog("解析成功 - type:%s phase:%s content_len:%d done:%v", 
-			upstreamData.Type, upstreamData.Data.Phase, 
+		debugLog("解析成功 - type:%s phase:%s content_len:%d done:%v",
+			upstreamData.Type, upstreamData.Data.Phase,
 			len(upstreamData.Data.DeltaContent), upstreamData.Data.Done)
 
 		if upstreamData.Data.DeltaContent != "" {
@@ -1891,7 +2019,7 @@ func handleNonStreamResponseWithIDs(w http.ResponseWriter, upstreamReq UpstreamR
 			break
 		}
 	}
-	
+
 	debugLog("扫描器共处理%d行", lineCount)
 
 	finalContent := fullContent.String()
