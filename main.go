@@ -528,7 +528,10 @@ func main() {
 	http.HandleFunc("/v1/models", handleModels)
 	http.HandleFunc("/v1/chat/completions", handleChatCompletions)
 	http.HandleFunc("/docs", handleAPIDocs)
-	http.HandleFunc("/", handleOptions)
+	http.HandleFunc("/playground", handlePlayground)
+	http.HandleFunc("/deploy", handleDeploy)
+	http.HandleFunc("/admin", handleAdmin)
+	http.HandleFunc("/", handleHome)
 
 	// Dashboard路由
 	if DASHBOARD_ENABLED {
@@ -569,6 +572,18 @@ func main() {
 
 // Dashboard页面处理器
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(getDashboardHTMLNew()))
+}
+
+// 旧的 handleDashboard 实现（已被替换）
+func handleDashboardOld(w http.ResponseWriter, r *http.Request) {
 	// 只允许GET请求
 	if r.Method != "GET" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -957,6 +972,18 @@ func handleDashboardRequests(w http.ResponseWriter, r *http.Request) {
 
 // API文档页面处理器
 func handleAPIDocs(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(getAPIDocsHTML()))
+}
+
+// 旧的 handleAPIDocs 实现（已替换为简化版本）
+func handleAPIDocsOld(w http.ResponseWriter, r *http.Request) {
 	// 只允许GET请求
 	if r.Method != "GET" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1471,13 +1498,54 @@ chatWithGLM('你好，请介绍一下JavaScript', false);</div>
 	fmt.Fprint(w, tmpl)
 }
 
-func handleOptions(w http.ResponseWriter, r *http.Request) {
+func handleHome(w http.ResponseWriter, r *http.Request) {
 	setCORSHeaders(w)
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	w.WriteHeader(http.StatusNotFound)
+
+	// 只处理根路径
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(getHomeHTML()))
+}
+
+func handlePlayground(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(getPlaygroundHTML()))
+}
+
+func handleDeploy(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(getDeployHTML()))
+}
+
+func handleAdmin(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(getAdminLoginHTML()))
 }
 
 func setCORSHeaders(w http.ResponseWriter) {
@@ -1488,17 +1556,135 @@ func setCORSHeaders(w http.ResponseWriter) {
 }
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
+	clientIP := getClientIP(r)
+	userAgent := r.UserAgent()
+
 	setCORSHeaders(w)
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
+	// 获取token（优先使用配置的ZAI_TOKEN，否则获取匿名token）
+	authToken := ZAI_TOKEN
+	if authToken == "" {
+		token, err := getAnonymousToken()
+		if err != nil {
+			debugLog("获取匿名token失败: %v", err)
+			// 直接fallback到默认模型
+			fallbackResponse := ModelsResponse{
+				Object: "list",
+				Data: []Model{
+					{
+						ID:      MODEL_NAME,
+						Object:  "model",
+						Created: time.Now().Unix(),
+						OwnedBy: "z.ai",
+					},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(fallbackResponse)
+			
+			duration := time.Since(startTime)
+			recordRequestStats(startTime, "/v1/models", http.StatusOK)
+			addLiveRequest(r.Method, "/v1/models", http.StatusOK, duration, clientIP, userAgent)
+			return
+		}
+		authToken = token
+	}
+
+	// 请求上游models API
+	client := &http.Client{Timeout: UPSTREAM_TIMEOUT * time.Second}
+	req, err := http.NewRequest("GET", "https://chat.z.ai/api/models", nil)
+	if err != nil {
+		debugLog("创建models请求失败: %v", err)
+		sendFallbackModels(w, r, startTime, clientIP, userAgent)
+		return
+	}
+
+	// 设置请求头（与deno版本保持一致）
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Language", "zh-CN")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+authToken)
+	req.Header.Set("User-Agent", BROWSER_UA)
+	req.Header.Set("Referer", ORIGIN_BASE+"/")
+	req.Header.Set("X-FE-Version", X_FE_VERSION)
+	req.Header.Set("sec-ch-ua", SEC_CH_UA)
+	req.Header.Set("sec-ch-ua-mobile", SEC_CH_UA_MOB)
+	req.Header.Set("sec-ch-ua-platform", SEC_CH_UA_PLAT)
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		debugLog("上游models请求失败: %v", err)
+		sendFallbackModels(w, r, startTime, clientIP, userAgent)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		debugLog("上游models请求返回非200状态码: %d", resp.StatusCode)
+		sendFallbackModels(w, r, startTime, clientIP, userAgent)
+		return
+	}
+
+	// 解析上游响应
+	var upstreamData struct {
+		Data []struct {
+			Name string `json:"name"`
+			ID   string `json:"id"`
+		} `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&upstreamData); err != nil {
+		debugLog("解析上游models响应失败: %v", err)
+		sendFallbackModels(w, r, startTime, clientIP, userAgent)
+		return
+	}
+
+	// 转换为OpenAI格式
+	models := make([]Model, 0, len(upstreamData.Data))
+	for _, model := range upstreamData.Data {
+		modelID := model.Name
+		if modelID == "" {
+			modelID = model.ID
+		}
+		models = append(models, Model{
+			ID:      modelID,
+			Object:  "model",
+			Created: time.Now().Unix(),
+			OwnedBy: "z.ai",
+		})
+	}
+
 	response := ModelsResponse{
+		Object: "list",
+		Data:   models,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+
+	// 记录成功统计
+	duration := time.Since(startTime)
+	recordRequestStats(startTime, "/v1/models", http.StatusOK)
+	addLiveRequest(r.Method, "/v1/models", http.StatusOK, duration, clientIP, userAgent)
+	
+	debugLog("成功返回 %d 个模型", len(models))
+}
+
+// sendFallbackModels 发送fallback单一模型响应
+func sendFallbackModels(w http.ResponseWriter, r *http.Request, startTime time.Time, clientIP string, userAgent string) {
+	fallbackResponse := ModelsResponse{
 		Object: "list",
 		Data: []Model{
 			{
-				ID:      "GLM-4.6",
+				ID:      MODEL_NAME,
 				Object:  "model",
 				Created: time.Now().Unix(),
 				OwnedBy: "z.ai",
@@ -1507,7 +1693,14 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	json.NewEncoder(w).Encode(fallbackResponse)
+
+	// 记录统计（仍然返回200，但是fallback数据）
+	duration := time.Since(startTime)
+	recordRequestStats(startTime, "/v1/models", http.StatusOK)
+	addLiveRequest(r.Method, "/v1/models", http.StatusOK, duration, clientIP, userAgent)
+	
+	debugLog("降级返回fallback模型: %s", MODEL_NAME)
 }
 
 func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
