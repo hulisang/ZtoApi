@@ -17,6 +17,9 @@ const DEFAULT_STREAM = Deno.env.get("DEFAULT_STREAM") !== "false";
 const DASHBOARD_ENABLED = Deno.env.get("DASHBOARD_ENABLED") !== "false";
 const ENABLE_THINKING = Deno.env.get("ENABLE_THINKING") === "true";
 
+// Signature secret for Z.AI authentication
+const ZAI_SIGNING_SECRET = Deno.env.get("ZAI_SIGNING_SECRET") || "junjie";
+
 // Admin authentication configuration
 const ADMIN_USERNAME = Deno.env.get("ADMIN_USERNAME") || "admin";
 const ADMIN_PASSWORD = Deno.env.get("ADMIN_PASSWORD") || "123456";
@@ -615,7 +618,7 @@ async function cleanupOldData() {
 // OpenAI request/response types
 interface Message {
   role: string;
-  content: string;
+  content: string | Array<{type: string; text?: string; [key: string]: unknown}>;
 }
 
 interface OpenAIRequest {
@@ -883,6 +886,164 @@ function transformThinking(s: string): string {
   return s.trim();
 }
 
+// ==================== 签名验证相关函数 ====================
+
+// URL安全的Base64解码（自动添加padding）
+function urlsafeB64Decode(data: string): Uint8Array | null {
+  try {
+    // 添加必要的padding
+    const padding = data.length % 4;
+    if (padding > 0) {
+      data += "=".repeat(4 - padding);
+    }
+    // 将URL安全字符替换为标准Base64字符
+    data = data.replace(/-/g, "+").replace(/_/g, "/");
+    // 解码Base64
+    const binaryString = atob(data);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
+  } catch (e) {
+    debugLog("Base64解码失败:", e);
+    return null;
+  }
+}
+
+// 解码JWT的payload部分（不验证签名）
+function decodeJWTPayload(token: string): Record<string, unknown> {
+  const parts = token.split(".");
+  if (parts.length < 2) {
+    return {};
+  }
+
+  const payloadBytes = urlsafeB64Decode(parts[1]);
+  if (!payloadBytes) {
+    return {};
+  }
+
+  try {
+    const payloadStr = new TextDecoder().decode(payloadBytes);
+    return JSON.parse(payloadStr);
+  } catch (e) {
+    debugLog("JWT payload解析失败:", e);
+    return {};
+  }
+}
+
+// 从JWT token中提取user_id
+function extractUserIDFromToken(token: string): string {
+  if (!token) {
+    return "guest";
+  }
+
+  const payload = decodeJWTPayload(token);
+
+  // 尝试多个可能的字段名
+  for (const key of ["id", "user_id", "uid", "sub"]) {
+    const val = payload[key];
+    if (typeof val === "string" && val !== "") {
+      return val;
+    }
+  }
+
+  return "guest";
+}
+
+// 提取最后一条用户消息的文本内容
+function extractLastUserMessage(messages: Message[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") {
+      const content = messages[i].content;
+      
+      // 处理字符串内容
+      if (typeof content === "string") {
+        return content;
+      }
+      
+      // 处理数组内容（支持多模态消息）
+      if (Array.isArray(content)) {
+        const textParts: string[] = [];
+        for (const part of content) {
+          if (typeof part === "object" && part !== null && part.type === "text" && part.text) {
+            textParts.push(part.text);
+          }
+        }
+        if (textParts.length > 0) {
+          return textParts.join("\n");
+        }
+      }
+      
+      // 如果内容既不是字符串也不是数组，返回空字符串
+      return "";
+    }
+  }
+  return "";
+}
+
+// 生成双层HMAC-SHA256签名
+// Layer1: derived_key = HMAC(secret, window_index)
+// Layer2: signature = HMAC(derived_key, canonical_string)
+// canonical_string = "requestId,<id>,timestamp,<ts>,user_id,<uid>|<msg>|<ts>"
+async function generateSignature(
+  messageText: string,
+  requestID: string,
+  timestampMs: number,
+  userID: string,
+  secret: string,
+): Promise<string> {
+  if (!secret) {
+    secret = "junjie";
+  }
+
+  // 构建规范字符串
+  const r = String(timestampMs);
+  const e = `requestId,${requestID},timestamp,${timestampMs},user_id,${userID}`;
+  const canonicalString = `${e}|${messageText}|${r}`;
+
+  // Layer1: 基于5分钟时间窗口生成派生密钥
+  const windowIndex = Math.floor(timestampMs / (5 * 60 * 1000));
+  const rootKey = new TextEncoder().encode(secret);
+
+  // 使用Web Crypto API生成HMAC
+  const cryptoKey1 = await crypto.subtle.importKey(
+    "raw",
+    rootKey,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+
+  const windowIndexBytes = new TextEncoder().encode(String(windowIndex));
+  const derivedKeyBuffer = await crypto.subtle.sign("HMAC", cryptoKey1, windowIndexBytes);
+  
+  // 将派生密钥转换为hex字符串
+  const derivedHexArray = Array.from(new Uint8Array(derivedKeyBuffer));
+  const derivedHex = derivedHexArray.map(b => b.toString(16).padStart(2, "0")).join("");
+
+  // Layer2: 使用派生密钥对规范字符串签名
+  const derivedKeyBytes = new TextEncoder().encode(derivedHex);
+  const cryptoKey2 = await crypto.subtle.importKey(
+    "raw",
+    derivedKeyBytes,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+
+  const canonicalBytes = new TextEncoder().encode(canonicalString);
+  const signatureBuffer = await crypto.subtle.sign("HMAC", cryptoKey2, canonicalBytes);
+  
+  // 将签名转换为hex字符串
+  const signatureArray = Array.from(new Uint8Array(signatureBuffer));
+  const signature = signatureArray.map(b => b.toString(16).padStart(2, "0")).join("");
+
+  return signature;
+}
+
+// ==================== 签名验证相关函数结束 ====================
+
 // Call upstream API
 async function callUpstream(
   upstreamReq: UpstreamRequest,
@@ -895,19 +1056,52 @@ async function callUpstream(
   debugLog("Calling upstream:", UPSTREAM_URL);
   debugLog("Request body:", reqBody);
 
-  // 生成 X-Signature - 基于请求体的 SHA-256 哈希（426错误修复）
-  const encoder = new TextEncoder();
-  const data = encoder.encode(reqBody);
-  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  const signature = hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+  // ========== 生成双层HMAC-SHA256签名（修复签名验证失败问题）==========
+  
+  // 生成时间戳（毫秒）
+  const timestampMs = Date.now();
+  
+  // 生成UUID格式的请求ID
+  const requestID = crypto.randomUUID();
+  
+  // 从token中提取user_id
+  const userID = extractUserIDFromToken(authToken);
+  
+  // 提取最后一条用户消息用于签名
+  const lastUserMessage = extractLastUserMessage(upstreamReq.messages);
+  
+  // 生成双层HMAC-SHA256签名
+  const signature = await generateSignature(
+    lastUserMessage,
+    requestID,
+    timestampMs,
+    userID,
+    ZAI_SIGNING_SECRET,
+  );
 
-  debugLog("Generated X-Signature:", signature);
+  debugLog("签名参数 - user_id:", userID, "message:", lastUserMessage.substring(0, 20) + "...", "timestamp:", timestampMs);
+  debugLog("生成签名:", signature, "(双层HMAC-SHA256)");
+
+  // ========== 签名生成结束 ==========
+
+  // 构建带查询参数的完整 URL（关键修复：添加必要的查询参数）
+  const queryParams = new URLSearchParams({
+    timestamp: String(timestampMs),
+    requestId: requestID,
+    user_id: userID,
+    token: authToken || "",
+    current_url: `${ORIGIN_BASE}/c/${chatID}`,
+    pathname: `/c/${chatID}`,
+    signature_timestamp: String(timestampMs),
+  });
+  const fullURL = `${UPSTREAM_URL}?${queryParams.toString()}`;
+
+  debugLog("调用上游API:", fullURL);
 
   // Generate dynamic browser headers for better fingerprinting
   const headers: Record<string, string> = generateBrowserHeaders(chatID, authToken);
 
-  // 添加 X-Signature header
+  // 添加 X-Signature header（使用双层HMAC-SHA256签名）
   headers["X-Signature"] = signature;
 
   // 添加额外的请求头
@@ -919,7 +1113,7 @@ async function callUpstream(
   // 添加 Cookie
   headers["Cookie"] = `token=${authToken}`;
 
-  const response = await fetch(UPSTREAM_URL, {
+  const response = await fetch(fullURL, {
     method: "POST",
     headers: headers,
     body: reqBody,
