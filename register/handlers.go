@@ -234,7 +234,7 @@ func HandleExportAccounts(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", "attachment; filename=zai_accounts.txt")
 
 	for _, acc := range accounts {
-		fmt.Fprintf(w, "%s|%s|%s|%s\n", acc.Email, acc.Password, acc.Token, acc.APIKEY)
+		fmt.Fprintf(w, "%s----%s----%s----%s\n", acc.Email, acc.Password, acc.Token, acc.APIKEY)
 	}
 }
 
@@ -386,7 +386,7 @@ func HandleImportAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 解析账号数据（格式: email|password|token|apikey）
+	// 解析账号数据（格式: email----password----token----apikey）
 	lines := strings.Split(string(content), "\n")
 	imported := 0
 	failed := 0
@@ -397,21 +397,23 @@ func HandleImportAccounts(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		parts := strings.Split(line, "|")
+		parts := strings.Split(line, "----")
 		if len(parts) < 3 {
 			failed++
 			continue
 		}
 
 		account := &Account{
-			Email:    parts[0],
-			Password: parts[1],
-			Token:    parts[2],
-			Status:   "active",
+			Email:     strings.TrimSpace(parts[0]),
+			Password:  strings.TrimSpace(parts[1]),
+			Token:     strings.TrimSpace(parts[2]),
+			Status:    "unknown",
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
 		}
 
-		if len(parts) > 3 {
-			account.APIKEY = parts[3]
+		if len(parts) > 3 && strings.TrimSpace(parts[3]) != "" {
+			account.APIKEY = strings.TrimSpace(parts[3])
 		}
 
 		if err := SaveAccount(account); err != nil {

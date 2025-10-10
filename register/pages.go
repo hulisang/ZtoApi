@@ -316,6 +316,10 @@ const MainPage = `<!DOCTYPE html>
                     <button id="exportBtn" class="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition">
                         📤 导出
                     </button>
+                    <button id="importBtn" class="px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 transition">
+                        📥 导入
+                    </button>
+                    <input type="file" id="importFileInput" accept=".txt" style="display: none;">
                 </div>
             </div>
             
@@ -492,9 +496,14 @@ const MainPage = `<!DOCTYPE html>
                     '<code class="bg-indigo-50 text-indigo-700 px-2 py-1 rounded text-xs">' + acc.apikey.substring(0, 20) + '...</code>' :
                     '<span class="text-gray-400 text-xs">未生成</span>';
                 
-                const statusDisplay = acc.status === 'active' ?
-                    '<span class="px-2 py-1 bg-green-100 text-green-700 rounded-full text-xs">✓ 正常</span>' :
-                    '<span class="px-2 py-1 bg-red-100 text-red-700 rounded-full text-xs">✗ 失效</span>';
+                let statusDisplay;
+                if (acc.status === 'active') {
+                    statusDisplay = '<span class="px-2 py-1 bg-green-100 text-green-700 rounded-full text-xs">✓ 正常</span>';
+                } else if (acc.status === 'inactive') {
+                    statusDisplay = '<span class="px-2 py-1 bg-red-100 text-red-700 rounded-full text-xs">✗ 失效</span>';
+                } else {
+                    statusDisplay = '<span class="px-2 py-1 bg-gray-100 text-gray-700 rounded-full text-xs">? 未知</span>';
+                }
 
                 const isChecked = selectedAccounts.has(acc.email);
 
@@ -610,6 +619,37 @@ const MainPage = `<!DOCTYPE html>
 
         $('#exportBtn').on('click', function() {
             window.open('/register/api/accounts/export', '_blank');
+        });
+
+        $('#importBtn').on('click', function() {
+            $('#importFileInput').click();
+        });
+
+        $('#importFileInput').on('change', async function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch('/register/api/accounts/import', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    showToast('导入成功！成功: ' + result.imported + ', 失败: ' + result.failed, 'success');
+                    loadAccounts();
+                } else {
+                    showToast('导入失败', 'error');
+                }
+            } catch (error) {
+                showToast('导入失败: ' + error, 'error');
+            }
+
+            $(this).val('');
         });
 
         $('#refreshBtn').on('click', function() {
