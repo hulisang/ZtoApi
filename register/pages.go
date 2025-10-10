@@ -387,14 +387,24 @@ const MainPage = `<!DOCTYPE html>
                 </table>
             </div>
             
-            <div class="flex items-center justify-between mt-4">
+            <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mt-4">
                 <div class="text-sm text-gray-600">
                     共 <span id="totalItems">0</span> 条数据
                 </div>
-                <div class="flex gap-2">
-                    <button id="prevPageBtn" class="px-3 py-1 border rounded hover:bg-gray-100">上一页</button>
-                    <span id="pageInfo" class="px-3 py-1">第 1 页</span>
-                    <button id="nextPageBtn" class="px-3 py-1 border rounded hover:bg-gray-100">下一页</button>
+                <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
+                    <div class="flex items-center gap-1 sm:gap-2 overflow-x-auto">
+                        <button id="firstPageBtn" class="px-2 sm:px-3 py-1 text-xs sm:text-sm border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap">首页</button>
+                        <button id="prevPageBtn" class="px-2 sm:px-3 py-1 text-xs sm:text-sm border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap">上一页</button>
+                        <div class="flex items-center gap-1" id="pageNumbers"></div>
+                        <button id="nextPageBtn" class="px-2 sm:px-3 py-1 text-xs sm:text-sm border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap">下一页</button>
+                        <button id="lastPageBtn" class="px-2 sm:px-3 py-1 text-xs sm:text-sm border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap">尾页</button>
+                    </div>
+                    <select id="pageSizeSelect" class="px-2 py-1 text-xs sm:text-sm border border-gray-300 rounded w-full sm:w-auto">
+                        <option value="10">10条/页</option>
+                        <option value="20" selected>20条/页</option>
+                        <option value="50">50条/页</option>
+                        <option value="100">100条/页</option>
+                    </select>
                 </div>
             </div>
         </div>
@@ -417,6 +427,8 @@ const MainPage = `<!DOCTYPE html>
         let accounts = [];
         let currentPage = 1;
         let pageSize = 20;
+        let totalPages = 1;
+        let totalItems = 0;
         let isRunning = false;
         let eventSource = null;
         let currentConfig = null;
@@ -465,6 +477,13 @@ const MainPage = `<!DOCTYPE html>
                 const response = await fetch(url);
                 const data = await response.json();
                 accounts = data.accounts || [];
+                
+                // 保存分页信息
+                if (data.pagination) {
+                    totalItems = data.pagination.total || 0;
+                    totalPages = Math.ceil(totalItems / pageSize);
+                }
+                
                 renderTable();
                 updateStats();
             } catch (error) {
@@ -592,6 +611,61 @@ const MainPage = `<!DOCTYPE html>
                     $btn.prop('disabled', false).text(originalText);
                 }
             });
+            
+            // 更新分页控件
+            updatePagination();
+        }
+
+        // 更新分页控件
+        function updatePagination() {
+            $('#totalItems').text(totalItems);
+
+            // 更新按钮状态
+            $('#firstPageBtn, #prevPageBtn').prop('disabled', currentPage === 1);
+            $('#nextPageBtn, #lastPageBtn').prop('disabled', currentPage === totalPages || totalPages === 0);
+
+            // 渲染页码
+            const $pageNumbers = $('#pageNumbers');
+            $pageNumbers.empty();
+
+            if (totalPages <= 7) {
+                // 总页数 <= 7，显示所有页码
+                for (let i = 1; i <= totalPages; i++) {
+                    addPageButton(i, $pageNumbers);
+                }
+            } else {
+                // 总页数 > 7，智能显示
+                addPageButton(1, $pageNumbers);
+                if (currentPage > 3) {
+                    $pageNumbers.append('<span class="px-2 text-gray-400">...</span>');
+                }
+
+                let start = Math.max(2, currentPage - 1);
+                let end = Math.min(totalPages - 1, currentPage + 1);
+
+                for (let i = start; i <= end; i++) {
+                    addPageButton(i, $pageNumbers);
+                }
+
+                if (currentPage < totalPages - 2) {
+                    $pageNumbers.append('<span class="px-2 text-gray-400">...</span>');
+                }
+                addPageButton(totalPages, $pageNumbers);
+            }
+        }
+
+        // 添加页码按钮
+        function addPageButton(page, container) {
+            const isActive = page === currentPage;
+            const $btn = $('<button>', {
+                text: page,
+                class: 'px-2 sm:px-3 py-1 text-xs sm:text-sm border rounded ' + (isActive ? 'bg-indigo-600 text-white border-indigo-600' : 'border-gray-300 hover:bg-gray-100'),
+                click: () => {
+                    currentPage = page;
+                    loadAccounts();
+                }
+            });
+            container.append($btn);
         }
 
         // 更新选中计数
@@ -913,6 +987,37 @@ const MainPage = `<!DOCTYPE html>
             }
         });
 
+        // 分页按钮事件
+        $('#firstPageBtn').on('click', () => { 
+            currentPage = 1; 
+            loadAccounts(); 
+        });
+        
+        $('#prevPageBtn').on('click', () => { 
+            if (currentPage > 1) { 
+                currentPage--; 
+                loadAccounts(); 
+            } 
+        });
+        
+        $('#nextPageBtn').on('click', () => { 
+            if (currentPage < totalPages) { 
+                currentPage++; 
+                loadAccounts(); 
+            } 
+        });
+        
+        $('#lastPageBtn').on('click', () => { 
+            currentPage = totalPages; 
+            loadAccounts(); 
+        });
+        
+        $('#pageSizeSelect').on('change', function() {
+            pageSize = parseInt($(this).val());
+            currentPage = 1;
+            loadAccounts();
+        });
+
         // 建立SSE连接（页面加载时立即连接）
         function connectSSE() {
             if (eventSource) {
@@ -979,4 +1084,3 @@ const MainPage = `<!DOCTYPE html>
     </script>
 </body>
 </html>`
-

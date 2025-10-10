@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,11 +18,14 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/hulisang/ZtoApi/register"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 // 配置变量（从环境变量读取）
@@ -33,15 +39,56 @@ var (
 	DEFAULT_STREAM    bool
 	DASHBOARD_ENABLED bool
 	ENABLE_THINKING   bool
+	REGISTER_ENABLED  bool
+	ADMIN_ENABLED     bool
+	ADMIN_USERNAME    string
+	ADMIN_PASSWORD    string
 )
 
 // 请求统计信息
 type RequestStats struct {
-	TotalRequests       int64
-	SuccessfulRequests  int64
-	FailedRequests      int64
-	LastRequestTime     time.Time
-	AverageResponseTime time.Duration
+	TotalRequests        int64
+	SuccessfulRequests   int64
+	FailedRequests       int64
+	LastRequestTime      time.Time
+	AverageResponseTime  time.Duration
+	HomePageViews        int64
+	APICallsCount        int64
+	ModelsCallsCount     int64
+	StreamingRequests    int64
+	NonStreamingRequests int64
+	TotalTokensUsed      int64
+	StartTime            time.Time
+	FastestResponse      time.Duration
+	SlowestResponse      time.Duration
+	ModelUsage           map[string]int64
+}
+
+// 小时统计
+type HourlyStats struct {
+	Hour              string  `json:"hour"`
+	Requests          int     `json:"requests"`
+	Success           int     `json:"success"`
+	Failed            int     `json:"failed"`
+	AvgResponseTime   float64 `json:"avgResponseTime"`
+	Tokens            int     `json:"tokens"`
+	StreamingCount    int     `json:"streamingCount"`
+	NonStreamingCount int     `json:"nonStreamingCount"`
+}
+
+// 每日统计
+type DailyStats struct {
+	Date              string  `json:"date"`
+	Requests          int     `json:"requests"`
+	Success           int     `json:"success"`
+	Failed            int     `json:"failed"`
+	AvgResponseTime   float64 `json:"avgResponseTime"`
+	Tokens            int     `json:"tokens"`
+	PeakHour          string  `json:"peakHour"`
+	StreamingCount    int     `json:"streamingCount"`
+	NonStreamingCount int     `json:"nonStreamingCount"`
+	FastestResponse   float64 `json:"fastestResponse"`
+	SlowestResponse   float64 `json:"slowestResponse"`
 }
 
 // 实时请求信息
@@ -53,6 +100,7 @@ type LiveRequest struct {
 	Status    int       `json:"status"`
 	Duration  int64     `json:"duration"`
 	UserAgent string    `json:"user_agent"`
+	Model     string    `json:"model,omitempty"`
 }
 
 // 全局变量
@@ -61,6 +109,8 @@ var (
 	liveRequests  = []LiveRequest{} // 初始化为空数组，而不是 nil
 	statsMutex    sync.Mutex
 	requestsMutex sync.Mutex
+	statsDB       *sql.DB
+	statsDBMutex  sync.RWMutex
 )
 
 // 思考内容处理策略
@@ -112,10 +162,374 @@ func initConfig() {
 	DEFAULT_STREAM = getEnv("DEFAULT_STREAM", "true") == "true"
 	DASHBOARD_ENABLED = getEnv("DASHBOARD_ENABLED", "true") == "true"
 	ENABLE_THINKING = getEnv("ENABLE_THINKING", "false") == "true"
+
+	// Admin 配置
+	ADMIN_ENABLED = getEnv("ADMIN_ENABLED", "true") == "true"
+	ADMIN_USERNAME = getEnv("ADMIN_USERNAME", "admin")
+	ADMIN_PASSWORD = getEnv("ADMIN_PASSWORD", "123456")
+}
+
+// 初始化统计数据库
+func initStatsDB() error {
+	// 使用与admin/register相同的数据库
+	dbPath := getEnv("REGISTER_DB_PATH", "./data/zai2api.db")
+
+	// 确保数据目录存在
+	os.MkdirAll("./data", 0755)
+
+	var err error
+	statsDB, err = sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return fmt.Errorf("打开统计数据库失败: %v", err)
+	}
+
+	// 设置连接池
+	statsDB.SetMaxOpenConns(10)
+	statsDB.SetMaxIdleConns(2)
+	statsDB.SetConnMaxLifetime(5 * time.Minute)
+
+	// 创建小时统计表
+	createHourlyTableSQL := `
+	CREATE TABLE IF NOT EXISTS hourly_stats (
+		hour TEXT PRIMARY KEY,
+		requests INTEGER DEFAULT 0,
+		success INTEGER DEFAULT 0,
+		failed INTEGER DEFAULT 0,
+		avg_response_time REAL DEFAULT 0,
+		tokens INTEGER DEFAULT 0,
+		streaming_count INTEGER DEFAULT 0,
+		non_streaming_count INTEGER DEFAULT 0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_hourly_hour ON hourly_stats(hour DESC);
+	`
+
+	// 创建每日统计表
+	createDailyTableSQL := `
+	CREATE TABLE IF NOT EXISTS daily_stats (
+		date TEXT PRIMARY KEY,
+		requests INTEGER DEFAULT 0,
+		success INTEGER DEFAULT 0,
+		failed INTEGER DEFAULT 0,
+		avg_response_time REAL DEFAULT 0,
+		tokens INTEGER DEFAULT 0,
+		peak_hour TEXT,
+		streaming_count INTEGER DEFAULT 0,
+		non_streaming_count INTEGER DEFAULT 0,
+		fastest_response REAL DEFAULT 0,
+		slowest_response REAL DEFAULT 0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_daily_date ON daily_stats(date DESC);
+	`
+
+	_, err = statsDB.Exec(createHourlyTableSQL)
+	if err != nil {
+		return fmt.Errorf("创建小时统计表失败: %v", err)
+	}
+
+	_, err = statsDB.Exec(createDailyTableSQL)
+	if err != nil {
+		return fmt.Errorf("创建每日统计表失败: %v", err)
+	}
+
+	return nil
+}
+
+// Admin 账号结构
+type AdminAccount struct {
+	ID        int64     `json:"id"`
+	Email     string    `json:"email"`
+	Password  string    `json:"password"`
+	Token     string    `json:"token"`
+	APIKEY    string    `json:"apikey"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// Admin Session 结构
+type AdminSession struct {
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"createdAt"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
+var (
+	adminDB        *sql.DB
+	adminDBMutex   sync.RWMutex
+	adminSessions  = make(map[string]*AdminSession)
+	adminSessionMu sync.RWMutex
+)
+
+// 获取当前小时key (格式: YYYY-MM-DD-HH)
+func getHourKey() string {
+	now := time.Now().UTC()
+	return fmt.Sprintf("%d-%02d-%02d-%02d", now.Year(), now.Month(), now.Day(), now.Hour())
+}
+
+// 获取当前日期key (格式: YYYY-MM-DD)
+func getDateKey() string {
+	now := time.Now().UTC()
+	return fmt.Sprintf("%d-%02d-%02d", now.Year(), now.Month(), now.Day())
+}
+
+// 保存小时统计到数据库
+func saveHourlyStats(duration time.Duration, status int, tokens int, model string, isStreaming bool) {
+	if statsDB == nil {
+		return
+	}
+
+	hourKey := getHourKey()
+	durationMs := float64(duration.Milliseconds())
+
+	statsDBMutex.Lock()
+	defer statsDBMutex.Unlock()
+
+	// 查询现有数据
+	var existing HourlyStats
+	err := statsDB.QueryRow(`
+		SELECT requests, success, failed, avg_response_time, tokens, streaming_count, non_streaming_count
+		FROM hourly_stats WHERE hour = ?
+	`, hourKey).Scan(&existing.Requests, &existing.Success, &existing.Failed,
+		&existing.AvgResponseTime, &existing.Tokens, &existing.StreamingCount, &existing.NonStreamingCount)
+
+	if err == sql.ErrNoRows {
+		// 插入新记录
+		_, err = statsDB.Exec(`
+			INSERT INTO hourly_stats (hour, requests, success, failed, avg_response_time, tokens, streaming_count, non_streaming_count)
+			VALUES (?, 1, ?, ?, ?, ?, ?, ?)
+		`, hourKey,
+			func() int {
+				if status >= 200 && status < 300 {
+					return 1
+				}
+				return 0
+			}(),
+			func() int {
+				if status >= 200 && status < 300 {
+					return 0
+				}
+				return 1
+			}(),
+			durationMs, tokens,
+			func() int {
+				if isStreaming {
+					return 1
+				}
+				return 0
+			}(),
+			func() int {
+				if !isStreaming {
+					return 1
+				}
+				return 0
+			}())
+	} else if err == nil {
+		// 更新现有记录
+		newRequests := existing.Requests + 1
+		newAvgTime := (existing.AvgResponseTime*float64(existing.Requests) + durationMs) / float64(newRequests)
+		newSuccess := existing.Success
+		newFailed := existing.Failed
+		if status >= 200 && status < 300 {
+			newSuccess++
+		} else {
+			newFailed++
+		}
+		newStreamingCount := existing.StreamingCount
+		newNonStreamingCount := existing.NonStreamingCount
+		if isStreaming {
+			newStreamingCount++
+		} else {
+			newNonStreamingCount++
+		}
+
+		_, err = statsDB.Exec(`
+			UPDATE hourly_stats 
+			SET requests = ?, success = ?, failed = ?, avg_response_time = ?, tokens = ?, 
+			    streaming_count = ?, non_streaming_count = ?
+			WHERE hour = ?
+		`, newRequests, newSuccess, newFailed, newAvgTime, existing.Tokens+tokens,
+			newStreamingCount, newNonStreamingCount, hourKey)
+	}
+
+	if err != nil {
+		debugLog("保存小时统计失败: %v", err)
+	}
+}
+
+// 保存每日统计
+func saveDailyStats() {
+	if statsDB == nil {
+		return
+	}
+
+	dateKey := getDateKey()
+
+	statsDBMutex.Lock()
+	defer statsDBMutex.Unlock()
+
+	// 聚合当天所有小时的数据
+	rows, err := statsDB.Query(`
+		SELECT SUM(requests), SUM(success), SUM(failed), AVG(avg_response_time), 
+		       SUM(tokens), SUM(streaming_count), SUM(non_streaming_count),
+		       MIN(avg_response_time), MAX(avg_response_time)
+		FROM hourly_stats WHERE hour LIKE ?
+	`, dateKey+"%")
+
+	if err != nil {
+		debugLog("查询每日统计失败: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	if rows.Next() {
+		var totalRequests, totalSuccess, totalFailed, totalStreaming, totalNonStreaming int
+		var avgTime, fastestResponse, slowestResponse float64
+		var totalTokens int
+
+		err = rows.Scan(&totalRequests, &totalSuccess, &totalFailed, &avgTime, &totalTokens,
+			&totalStreaming, &totalNonStreaming, &fastestResponse, &slowestResponse)
+		if err != nil {
+			debugLog("扫描每日统计失败: %v", err)
+			return
+		}
+
+		// 找出峰值小时
+		var peakHour string
+		var maxRequests int
+		rows2, err := statsDB.Query(`
+			SELECT hour, requests FROM hourly_stats 
+			WHERE hour LIKE ? ORDER BY requests DESC LIMIT 1
+		`, dateKey+"%")
+		if err == nil {
+			defer rows2.Close()
+			if rows2.Next() {
+				rows2.Scan(&peakHour, &maxRequests)
+			}
+		}
+
+		// 插入或更新每日统计
+		_, err = statsDB.Exec(`
+			INSERT OR REPLACE INTO daily_stats 
+			(date, requests, success, failed, avg_response_time, tokens, peak_hour, 
+			 streaming_count, non_streaming_count, fastest_response, slowest_response)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, dateKey, totalRequests, totalSuccess, totalFailed, avgTime, totalTokens, peakHour,
+			totalStreaming, totalNonStreaming, fastestResponse, slowestResponse)
+
+		if err != nil {
+			debugLog("保存每日统计失败: %v", err)
+		}
+	}
+}
+
+// 获取小时统计
+func getHourlyStats(hours int) ([]HourlyStats, error) {
+	if statsDB == nil {
+		return []HourlyStats{}, nil
+	}
+
+	statsDBMutex.RLock()
+	defer statsDBMutex.RUnlock()
+
+	rows, err := statsDB.Query(`
+		SELECT hour, requests, success, failed, avg_response_time, tokens, 
+		       streaming_count, non_streaming_count
+		FROM hourly_stats ORDER BY hour DESC LIMIT ?
+	`, hours)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []HourlyStats
+	for rows.Next() {
+		var stat HourlyStats
+		err := rows.Scan(&stat.Hour, &stat.Requests, &stat.Success, &stat.Failed,
+			&stat.AvgResponseTime, &stat.Tokens, &stat.StreamingCount, &stat.NonStreamingCount)
+		if err != nil {
+			continue
+		}
+		result = append(result, stat)
+	}
+
+	// 反转数组，使其按时间正序
+	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+		result[i], result[j] = result[j], result[i]
+	}
+
+	return result, nil
+}
+
+// 获取每日统计
+func getDailyStats(days int) ([]DailyStats, error) {
+	if statsDB == nil {
+		return []DailyStats{}, nil
+	}
+
+	statsDBMutex.RLock()
+	defer statsDBMutex.RUnlock()
+
+	rows, err := statsDB.Query(`
+		SELECT date, requests, success, failed, avg_response_time, tokens, peak_hour,
+		       streaming_count, non_streaming_count, fastest_response, slowest_response
+		FROM daily_stats ORDER BY date DESC LIMIT ?
+	`, days)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []DailyStats
+	for rows.Next() {
+		var stat DailyStats
+		err := rows.Scan(&stat.Date, &stat.Requests, &stat.Success, &stat.Failed,
+			&stat.AvgResponseTime, &stat.Tokens, &stat.PeakHour,
+			&stat.StreamingCount, &stat.NonStreamingCount, &stat.FastestResponse, &stat.SlowestResponse)
+		if err != nil {
+			continue
+		}
+		result = append(result, stat)
+	}
+
+	// 反转数组，使其按时间正序
+	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+		result[i], result[j] = result[j], result[i]
+	}
+
+	return result, nil
+}
+
+// 清理旧数据
+func cleanupOldData() {
+	if statsDB == nil {
+		return
+	}
+
+	statsDBMutex.Lock()
+	defer statsDBMutex.Unlock()
+
+	// 删除7天前的小时数据
+	sevenDaysAgo := time.Now().AddDate(0, 0, -7).Format("2006-01-02")
+	_, err := statsDB.Exec(`DELETE FROM hourly_stats WHERE hour < ?`, sevenDaysAgo)
+	if err != nil {
+		debugLog("清理小时数据失败: %v", err)
+	}
+
+	// 删除90天前的每日数据
+	ninetyDaysAgo := time.Now().AddDate(0, 0, -90).Format("2006-01-02")
+	_, err = statsDB.Exec(`DELETE FROM daily_stats WHERE date < ?`, ninetyDaysAgo)
+	if err != nil {
+		debugLog("清理每日数据失败: %v", err)
+	}
 }
 
 // 记录请求统计信息
 func recordRequestStats(startTime time.Time, path string, status int) {
+	recordRequestStatsDetailed(startTime, path, status, "", false, 0)
+}
+
+// 记录详细的请求统计信息
+func recordRequestStatsDetailed(startTime time.Time, path string, status int, model string, isStreaming bool, tokens int) {
 	duration := time.Since(startTime)
 
 	statsMutex.Lock()
@@ -137,10 +551,51 @@ func recordRequestStats(startTime time.Time, path string, status int) {
 	} else {
 		stats.AverageResponseTime = duration
 	}
+
+	// 更新最快和最慢响应时间
+	if stats.FastestResponse == 0 || duration < stats.FastestResponse {
+		stats.FastestResponse = duration
+	}
+	if duration > stats.SlowestResponse {
+		stats.SlowestResponse = duration
+	}
+
+	// 统计路径类型
+	if path == "/" {
+		stats.HomePageViews++
+	} else if path == "/v1/chat/completions" {
+		stats.APICallsCount++
+		if isStreaming {
+			stats.StreamingRequests++
+		} else {
+			stats.NonStreamingRequests++
+		}
+	} else if path == "/v1/models" {
+		stats.ModelsCallsCount++
+	}
+
+	// 统计模型使用
+	if model != "" {
+		if stats.ModelUsage == nil {
+			stats.ModelUsage = make(map[string]int64)
+		}
+		stats.ModelUsage[model]++
+	}
+
+	// 统计tokens
+	stats.TotalTokensUsed += int64(tokens)
+
+	// 异步保存到数据库
+	go saveHourlyStats(duration, status, tokens, model, isStreaming)
 }
 
 // 添加实时请求信息
-func addLiveRequest(method, path string, status int, duration time.Duration, _, userAgent string) {
+func addLiveRequest(method, path string, status int, duration time.Duration, clientIP, userAgent string) {
+	addLiveRequestWithModel(method, path, status, duration, clientIP, userAgent, "")
+}
+
+// 添加实时请求信息(带模型)
+func addLiveRequestWithModel(method, path string, status int, duration time.Duration, clientIP, userAgent, model string) {
 	requestsMutex.Lock()
 	defer requestsMutex.Unlock()
 
@@ -152,6 +607,7 @@ func addLiveRequest(method, path string, status int, duration time.Duration, _, 
 		Status:    status,
 		Duration:  duration.Milliseconds(),
 		UserAgent: userAgent,
+		Model:     model,
 	}
 
 	liveRequests = append(liveRequests, request)
@@ -186,7 +642,58 @@ func getStatsData() []byte {
 	statsMutex.Lock()
 	defer statsMutex.Unlock()
 
-	data, _ := json.Marshal(stats)
+	// 获取前3个最常用的模型
+	type ModelCount struct {
+		Model string `json:"model"`
+		Count int64  `json:"count"`
+	}
+	var topModels []ModelCount
+
+	if stats.ModelUsage != nil {
+		// 转换map为slice以便排序
+		var modelList []ModelCount
+		for model, count := range stats.ModelUsage {
+			modelList = append(modelList, ModelCount{Model: model, Count: count})
+		}
+
+		// 按使用次数降序排序
+		sort.Slice(modelList, func(i, j int) bool {
+			return modelList[i].Count > modelList[j].Count
+		})
+
+		// 取前3个
+		if len(modelList) > 3 {
+			topModels = modelList[:3]
+		} else {
+			topModels = modelList
+		}
+	}
+
+	// 构建响应
+	response := map[string]interface{}{
+		"totalRequests":        stats.TotalRequests,
+		"successfulRequests":   stats.SuccessfulRequests,
+		"failedRequests":       stats.FailedRequests,
+		"lastRequestTime":      stats.LastRequestTime,
+		"averageResponseTime":  stats.AverageResponseTime.Milliseconds(),
+		"homePageViews":        stats.HomePageViews,
+		"apiCallsCount":        stats.APICallsCount,
+		"modelsCallsCount":     stats.ModelsCallsCount,
+		"streamingRequests":    stats.StreamingRequests,
+		"nonStreamingRequests": stats.NonStreamingRequests,
+		"totalTokensUsed":      stats.TotalTokensUsed,
+		"startTime":            stats.StartTime,
+		"fastestResponse": func() int64 {
+			if stats.FastestResponse == 0 {
+				return -1
+			}
+			return stats.FastestResponse.Milliseconds()
+		}(),
+		"slowestResponse": stats.SlowestResponse.Milliseconds(),
+		"topModels":       topModels,
+	}
+
+	data, _ := json.Marshal(response)
 	return data
 }
 
@@ -392,6 +899,54 @@ func getUpstreamModelID(modelName string) string {
 	}
 }
 
+// 获取认证 token（统一入口）
+// 优先级：环境变量 ZAI_TOKEN > 数据库随机 token > 匿名 token
+func getAuthToken() (string, error) {
+	// 1. 优先使用环境变量配置的 ZAI_TOKEN
+	if ZAI_TOKEN != "" {
+		debugLog("使用环境变量 ZAI_TOKEN: %s...", func() string {
+			if len(ZAI_TOKEN) > TOKEN_DISPLAY_LENGTH {
+				return ZAI_TOKEN[:TOKEN_DISPLAY_LENGTH]
+			}
+			return ZAI_TOKEN
+		}())
+		return ZAI_TOKEN, nil
+	}
+
+	// 2. 尝试从数据库随机获取 token
+	if REGISTER_ENABLED {
+		if token, err := register.GetRandomToken(); err == nil && token != "" {
+			debugLog("使用数据库随机 token: %s...", func() string {
+				if len(token) > TOKEN_DISPLAY_LENGTH {
+					return token[:TOKEN_DISPLAY_LENGTH]
+				}
+				return token
+			}())
+			return token, nil
+		} else if err != nil {
+			debugLog("从数据库获取 token 失败: %v", err)
+		}
+	}
+
+	// 3. fallback 到匿名 token
+	if ANON_TOKEN_ENABLED {
+		token, err := getAnonymousToken()
+		if err == nil {
+			debugLog("使用匿名 token: %s...", func() string {
+				if len(token) > TOKEN_DISPLAY_LENGTH {
+					return token[:TOKEN_DISPLAY_LENGTH]
+				}
+				return token
+			}())
+			return token, nil
+		}
+		debugLog("获取匿名 token 失败: %v", err)
+		return "", err
+	}
+
+	return "", fmt.Errorf("无可用的认证 token")
+}
+
 // 获取匿名token（每次对话使用不同token，避免共享记忆）
 func getAnonymousToken() (string, error) {
 	client := &http.Client{Timeout: AUTH_TOKEN_TIMEOUT * time.Second}
@@ -524,6 +1079,29 @@ func main() {
 	// 初始化配置
 	initConfig()
 
+	// 初始化统计数据
+	stats.StartTime = time.Now()
+	stats.ModelUsage = make(map[string]int64)
+	stats.FastestResponse = time.Duration(0)
+	stats.SlowestResponse = time.Duration(0)
+
+	// 初始化统计数据库
+	if err := initStatsDB(); err != nil {
+		log.Printf("❌ 统计数据库初始化失败: %v", err)
+	} else {
+		log.Printf("✅ 统计数据库初始化成功")
+
+		// 启动每小时的定时任务（保存每日统计和清理旧数据）
+		go func() {
+			ticker := time.NewTicker(1 * time.Hour)
+			defer ticker.Stop()
+			for range ticker.C {
+				saveDailyStats()
+				cleanupOldData()
+			}
+		}()
+	}
+
 	// 注册路由
 	http.HandleFunc("/v1/models", handleModels)
 	http.HandleFunc("/v1/chat/completions", handleChatCompletions)
@@ -531,6 +1109,12 @@ func main() {
 	http.HandleFunc("/playground", handlePlayground)
 	http.HandleFunc("/deploy", handleDeploy)
 	http.HandleFunc("/admin", handleAdmin)
+	http.HandleFunc("/admin/login", handleAdminLogin)
+	http.HandleFunc("/admin/api/login", handleAdminAPILogin)
+	http.HandleFunc("/admin/api/logout", handleAdminAPILogout)
+	http.HandleFunc("/admin/api/accounts", handleAdminAPIAccounts)
+	http.HandleFunc("/admin/api/export", handleAdminAPIExport)
+	http.HandleFunc("/admin/api/import-batch", handleAdminAPIImportBatch)
 	http.HandleFunc("/", handleHome)
 
 	// Dashboard路由
@@ -538,12 +1122,15 @@ func main() {
 		http.HandleFunc("/dashboard", handleDashboard)
 		http.HandleFunc("/dashboard/stats", handleDashboardStats)
 		http.HandleFunc("/dashboard/requests", handleDashboardRequests)
+		http.HandleFunc("/dashboard/hourly", handleDashboardHourly)
+		http.HandleFunc("/dashboard/daily", handleDashboardDaily)
 		log.Printf("Dashboard已启用，访问地址: http://localhost%s/dashboard", PORT)
 	}
 
 	// 初始化注册管理系统
 	registerEnabled := getEnv("REGISTER_ENABLED", "true")
-	if registerEnabled == "true" || registerEnabled == "1" {
+	REGISTER_ENABLED = (registerEnabled == "true" || registerEnabled == "1")
+	if REGISTER_ENABLED {
 		dbPath := getEnv("REGISTER_DB_PATH", "./data/zai2api.db")
 		if err := register.InitRegisterSystem(dbPath); err != nil {
 			log.Printf("❌ 注册系统初始化失败: %v", err)
@@ -551,6 +1138,15 @@ func main() {
 			// 注册路由
 			register.RegisterRoutes(http.DefaultServeMux)
 			log.Printf("🔐 注册管理: http://localhost%s/register/login", PORT)
+		}
+	}
+
+	// 初始化 Admin 系统
+	if ADMIN_ENABLED {
+		if err := initAdminDB(); err != nil {
+			log.Printf("❌ Admin 系统初始化失败: %v", err)
+		} else {
+			log.Printf("🔐 Admin 面板: http://localhost%s/admin (用户名: %s)", PORT, ADMIN_USERNAME)
 		}
 	}
 
@@ -967,7 +1563,101 @@ func handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 // Dashboard请求数据处理器
 func handleDashboardRequests(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(getLiveRequestsData())
+
+	// 获取分页参数
+	page := 1
+	pageSize := 20
+
+	if pageStr := r.URL.Query().Get("page"); pageStr != "" {
+		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
+			page = p
+		}
+	}
+
+	if pageSizeStr := r.URL.Query().Get("pageSize"); pageSizeStr != "" {
+		if ps, err := strconv.Atoi(pageSizeStr); err == nil && ps > 0 && ps <= 100 {
+			pageSize = ps
+		}
+	}
+
+	requestsMutex.Lock()
+	defer requestsMutex.Unlock()
+
+	total := len(liveRequests)
+	totalPages := (total + pageSize - 1) / pageSize
+
+	// 反转数组（最新的在前）
+	reversed := make([]LiveRequest, len(liveRequests))
+	for i, req := range liveRequests {
+		reversed[len(liveRequests)-1-i] = req
+	}
+
+	// 计算分页
+	start := (page - 1) * pageSize
+	end := start + pageSize
+	if start > total {
+		start = total
+	}
+	if end > total {
+		end = total
+	}
+
+	var pageData []LiveRequest
+	if start < end {
+		pageData = reversed[start:end]
+	} else {
+		pageData = []LiveRequest{}
+	}
+
+	response := map[string]interface{}{
+		"requests":   pageData,
+		"total":      total,
+		"page":       page,
+		"pageSize":   pageSize,
+		"totalPages": totalPages,
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// Dashboard小时统计处理器
+func handleDashboardHourly(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	hours := 24
+	if hoursStr := r.URL.Query().Get("hours"); hoursStr != "" {
+		if h, err := strconv.Atoi(hoursStr); err == nil && h > 0 && h <= 168 {
+			hours = h
+		}
+	}
+
+	stats, err := getHourlyStats(hours)
+	if err != nil {
+		http.Error(w, "Failed to get hourly stats", http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(stats)
+}
+
+// Dashboard每日统计处理器
+func handleDashboardDaily(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	days := 30
+	if daysStr := r.URL.Query().Get("days"); daysStr != "" {
+		if d, err := strconv.Atoi(daysStr); err == nil && d > 0 && d <= 90 {
+			days = d
+		}
+	}
+
+	stats, err := getDailyStats(days)
+	if err != nil {
+		http.Error(w, "Failed to get daily stats", http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(stats)
 }
 
 // API文档页面处理器
@@ -1522,6 +2212,16 @@ func handlePlayground(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 检查是否启用了register模块
+	if REGISTER_ENABLED {
+		// 需要身份验证
+		if !register.CheckAuth(r) {
+			// 未认证，重定向到登录页
+			http.Redirect(w, r, "/admin/login", http.StatusFound)
+			return
+		}
+	}
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(getPlaygroundHTML()))
 }
@@ -1537,7 +2237,8 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(getDeployHTML()))
 }
 
-func handleAdmin(w http.ResponseWriter, r *http.Request) {
+// 处理登录页面
+func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	setCORSHeaders(w)
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
@@ -1546,6 +2247,23 @@ func handleAdmin(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(getAdminLoginHTML()))
+}
+
+func handleAdmin(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// 检查认证
+	if !checkAdminAuth(r) {
+		http.Redirect(w, r, "/admin/login", http.StatusFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(getAdminPanelHTML()))
 }
 
 func setCORSHeaders(w http.ResponseWriter) {
@@ -1566,12 +2284,26 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 获取token（优先使用配置的ZAI_TOKEN，否则获取匿名token）
-	authToken := ZAI_TOKEN
-	if authToken == "" {
-		token, err := getAnonymousToken()
-		if err != nil {
-			debugLog("获取匿名token失败: %v", err)
+	// 获取认证 token
+	// 优先级：请求头自定义 token > 环境变量 > 数据库随机 token > 匿名 token
+	var authToken string
+	
+	// 1. 检查请求头是否有用户自定义的 ZAI Token (来自 playground)
+	customToken := r.Header.Get("X-ZAI-Token")
+	if customToken != "" {
+		authToken = customToken
+		debugLog("使用 Playground 自定义 token: %s...", func() string {
+			if len(customToken) > TOKEN_DISPLAY_LENGTH {
+				return customToken[:TOKEN_DISPLAY_LENGTH]
+			}
+			return customToken
+		}())
+	} else {
+		// 2. 使用统一的 token 获取逻辑
+		var tokenErr error
+		authToken, tokenErr = getAuthToken()
+		if tokenErr != nil {
+			debugLog("获取认证 token 失败: %v", tokenErr)
 			// 直接fallback到默认模型
 			fallbackResponse := ModelsResponse{
 				Object: "list",
@@ -1586,13 +2318,12 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(fallbackResponse)
-			
+
 			duration := time.Since(startTime)
 			recordRequestStats(startTime, "/v1/models", http.StatusOK)
 			addLiveRequest(r.Method, "/v1/models", http.StatusOK, duration, clientIP, userAgent)
 			return
 		}
-		authToken = token
 	}
 
 	// 请求上游models API
@@ -1674,7 +2405,7 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 	duration := time.Since(startTime)
 	recordRequestStats(startTime, "/v1/models", http.StatusOK)
 	addLiveRequest(r.Method, "/v1/models", http.StatusOK, duration, clientIP, userAgent)
-	
+
 	debugLog("成功返回 %d 个模型", len(models))
 }
 
@@ -1699,7 +2430,7 @@ func sendFallbackModels(w http.ResponseWriter, r *http.Request, startTime time.T
 	duration := time.Since(startTime)
 	recordRequestStats(startTime, "/v1/models", http.StatusOK)
 	addLiveRequest(r.Method, "/v1/models", http.StatusOK, duration, clientIP, userAgent)
-	
+
 	debugLog("降级返回fallback模型: %s", MODEL_NAME)
 }
 
@@ -1816,27 +2547,29 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	// 选择本次对话使用的token：优先使用配置的ZAI_TOKEN，否则获取匿名token
-	authToken := ZAI_TOKEN
-	if authToken == "" && ANON_TOKEN_ENABLED {
-		if t, err := getAnonymousToken(); err == nil {
-			authToken = t
-			debugLog("使用匿名token: %s...", func() string {
-				if len(t) > TOKEN_DISPLAY_LENGTH {
-					return t[:TOKEN_DISPLAY_LENGTH]
-				}
-				return t
-			}())
-		} else {
-			debugLog("匿名token获取失败: %v", err)
-		}
-	} else if authToken != "" {
-		debugLog("使用配置的ZAI_TOKEN: %s...", func() string {
-			if len(authToken) > TOKEN_DISPLAY_LENGTH {
-				return authToken[:TOKEN_DISPLAY_LENGTH]
+	// 获取认证 token
+	// 优先级：请求头自定义 token > 环境变量 > 数据库随机 token > 匿名 token
+	var authToken string
+	
+	// 1. 检查请求头是否有用户自定义的 ZAI Token (来自 playground)
+	customToken := r.Header.Get("X-ZAI-Token")
+	if customToken != "" {
+		authToken = customToken
+		debugLog("使用 Playground 自定义 token: %s...", func() string {
+			if len(customToken) > TOKEN_DISPLAY_LENGTH {
+				return customToken[:TOKEN_DISPLAY_LENGTH]
 			}
-			return authToken
+			return customToken
 		}())
+	} else {
+		// 2. 使用统一的 token 获取逻辑
+		var tokenErr error
+		authToken, tokenErr = getAuthToken()
+		if tokenErr != nil {
+			debugLog("获取认证 token 失败: %v", tokenErr)
+			http.Error(w, "No available auth token", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// 调用上游API
@@ -2139,8 +2872,8 @@ func handleStreamResponseWithIDs(w http.ResponseWriter, upstreamReq UpstreamRequ
 
 	// 记录成功请求统计
 	duration := time.Since(startTime)
-	recordRequestStats(startTime, path, http.StatusOK)
-	addLiveRequest("POST", path, http.StatusOK, duration, "", userAgent)
+	recordRequestStatsDetailed(startTime, path, http.StatusOK, upstreamReq.Model, true, 0)
+	addLiveRequestWithModel("POST", path, http.StatusOK, duration, "", userAgent, upstreamReq.Model)
 }
 
 func writeSSEChunk(w http.ResponseWriter, chunk OpenAIResponse) {
@@ -2262,6 +2995,398 @@ func handleNonStreamResponseWithIDs(w http.ResponseWriter, upstreamReq UpstreamR
 
 	// 记录成功请求统计
 	duration := time.Since(startTime)
-	recordRequestStats(startTime, path, http.StatusOK)
-	addLiveRequest("POST", path, http.StatusOK, duration, "", userAgent)
+	recordRequestStatsDetailed(startTime, path, http.StatusOK, upstreamReq.Model, false, 0)
+	addLiveRequestWithModel("POST", path, http.StatusOK, duration, "", userAgent, upstreamReq.Model)
+}
+
+// ==================== Admin 相关函数 ====================
+
+// 初始化 admin 数据库（共用 register 数据库）
+func initAdminDB() error {
+	dbPath := os.Getenv("REGISTER_DB_PATH")
+	if dbPath == "" {
+		dbPath = "./data/zai2api.db"
+	}
+
+	// 确保数据目录存在
+	os.MkdirAll("./data", 0755)
+
+	var err error
+	adminDB, err = sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return fmt.Errorf("打开数据库失败: %v", err)
+	}
+
+	// 设置连接池
+	adminDB.SetMaxOpenConns(25)
+	adminDB.SetMaxIdleConns(5)
+	adminDB.SetConnMaxLifetime(5 * time.Minute)
+
+	// 确保表存在（如果 register 模块已创建则跳过）
+	createTableSQL := `
+	CREATE TABLE IF NOT EXISTS accounts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		email TEXT UNIQUE NOT NULL,
+		password TEXT NOT NULL,
+		token TEXT NOT NULL,
+		apikey TEXT,
+		status TEXT DEFAULT 'active',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_accounts_email ON accounts(email);
+	CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status);
+	`
+	_, err = adminDB.Exec(createTableSQL)
+	if err != nil {
+		return fmt.Errorf("创建表失败: %v", err)
+	}
+
+	return nil
+}
+
+// 生成 session ID
+func generateAdminSessionID() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(bytes), nil
+}
+
+// 检查 admin 认证
+func checkAdminAuth(r *http.Request) bool {
+	if !ADMIN_ENABLED {
+		return true // 如果未启用 admin，允许所有访问
+	}
+
+	cookie, err := r.Cookie("adminSessionId")
+	if err != nil {
+		return false
+	}
+
+	adminSessionMu.RLock()
+	session, exists := adminSessions[cookie.Value]
+	adminSessionMu.RUnlock()
+
+	if !exists {
+		return false
+	}
+
+	// 检查是否过期
+	if time.Now().After(session.ExpiresAt) {
+		adminSessionMu.Lock()
+		delete(adminSessions, cookie.Value)
+		adminSessionMu.Unlock()
+		return false
+	}
+
+	return true
+}
+
+// 获取所有账号
+func getAllAdminAccounts() ([]AdminAccount, error) {
+	adminDBMutex.RLock()
+	defer adminDBMutex.RUnlock()
+
+	if adminDB == nil {
+		return []AdminAccount{}, nil
+	}
+
+	rows, err := adminDB.Query(`
+		SELECT id, email, password, token, COALESCE(apikey, '') as apikey, created_at 
+		FROM accounts 
+		ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var accounts []AdminAccount
+	for rows.Next() {
+		var acc AdminAccount
+		err := rows.Scan(&acc.ID, &acc.Email, &acc.Password, &acc.Token, &acc.APIKEY, &acc.CreatedAt)
+		if err != nil {
+			continue
+		}
+		accounts = append(accounts, acc)
+	}
+
+	return accounts, nil
+}
+
+// 检查账号是否存在
+func adminAccountExists(email string) (bool, error) {
+	adminDBMutex.RLock()
+	defer adminDBMutex.RUnlock()
+
+	if adminDB == nil {
+		return false, nil
+	}
+
+	var count int
+	err := adminDB.QueryRow("SELECT COUNT(*) FROM accounts WHERE email = ?", email).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// 保存账号到数据库
+func saveAdminAccount(email, password, token, apikey string) error {
+	adminDBMutex.Lock()
+	defer adminDBMutex.Unlock()
+
+	if adminDB == nil {
+		return fmt.Errorf("数据库未初始化")
+	}
+
+	_, err := adminDB.Exec(`
+		INSERT INTO accounts (email, password, token, apikey, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'active', datetime('now'), datetime('now'))
+	`, email, password, token, apikey)
+
+	return err
+}
+
+// ==================== HTTP 处理函数 ====================
+
+// 处理登录 API
+func handleAdminAPILogin(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "请求格式错误",
+		})
+		return
+	}
+
+	// 验证用户名和密码
+	if req.Username == ADMIN_USERNAME && req.Password == ADMIN_PASSWORD {
+		// 生成 session
+		sessionID, err := generateAdminSessionID()
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "生成会话失败",
+			})
+			return
+		}
+
+		// 保存 session
+		session := &AdminSession{
+			ID:        sessionID,
+			CreatedAt: time.Now(),
+			ExpiresAt: time.Now().Add(24 * time.Hour),
+		}
+
+		adminSessionMu.Lock()
+		adminSessions[sessionID] = session
+		adminSessionMu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":   true,
+			"sessionId": sessionID,
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": false,
+		"error":   "用户名或密码错误",
+	})
+}
+
+// 处理登出 API
+func handleAdminAPILogout(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	cookie, err := r.Cookie("adminSessionId")
+	if err == nil {
+		adminSessionMu.Lock()
+		delete(adminSessions, cookie.Value)
+		adminSessionMu.Unlock()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+	})
+}
+
+// 处理获取账号列表 API
+func handleAdminAPIAccounts(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if !checkAdminAuth(r) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "未授权",
+		})
+		return
+	}
+
+	accounts, err := getAllAdminAccounts()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(accounts)
+}
+
+// 处理导出账号 API
+func handleAdminAPIExport(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if !checkAdminAuth(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	accounts, err := getAllAdminAccounts()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var lines []string
+	for _, acc := range accounts {
+		if acc.APIKEY != "" {
+			lines = append(lines, fmt.Sprintf("%s----%s----%s----%s", acc.Email, acc.Password, acc.Token, acc.APIKEY))
+		} else {
+			lines = append(lines, fmt.Sprintf("%s----%s----%s----", acc.Email, acc.Password, acc.Token))
+		}
+	}
+
+	content := strings.Join(lines, "\n")
+	filename := fmt.Sprintf("zai_accounts_%d.txt", time.Now().Unix())
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+	w.Write([]byte(content))
+}
+
+// 处理批量导入账号 API
+func handleAdminAPIImportBatch(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if !checkAdminAuth(r) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "未授权",
+		})
+		return
+	}
+
+	var req struct {
+		Accounts []struct {
+			Email    string `json:"email"`
+			Password string `json:"password"`
+			Token    string `json:"token"`
+			APIKEY   string `json:"apikey"`
+		} `json:"accounts"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "数据格式错误",
+		})
+		return
+	}
+
+	imported := 0
+	skipped := 0
+
+	for _, acc := range req.Accounts {
+		if acc.Email == "" || acc.Password == "" || acc.Token == "" {
+			skipped++
+			continue
+		}
+
+		// 检查是否已存在
+		exists, err := adminAccountExists(acc.Email)
+		if err != nil || exists {
+			skipped++
+			continue
+		}
+
+		// 保存账号
+		if err := saveAdminAccount(acc.Email, acc.Password, acc.Token, acc.APIKEY); err != nil {
+			skipped++
+			continue
+		}
+
+		imported++
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":  true,
+		"imported": imported,
+		"skipped":  skipped,
+	})
 }

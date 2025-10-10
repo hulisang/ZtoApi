@@ -75,23 +75,23 @@ func registerZAIAccount(email, password string, config RegisterConfig) (*Account
 		"profile_image_url": "data:image/png;base64,",
 		"sso_redirect":      nil,
 	}
-	
+
 	signupBody, _ := json.Marshal(signupPayload)
 	req, err := http.NewRequest("POST", "https://chat.z.ai/api/v1/auths/signup", bytes.NewBuffer(signupBody))
 	if err != nil {
 		return nil, fmt.Errorf("  ✗ 创建请求失败:%v", err)
 	}
-	
+
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 	req.Header.Set("Origin", "https://chat.z.ai")
-	
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("  ✗ 注册失败:%v", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("  ✗ 注册失败:HTTP%d:%s", resp.StatusCode, string(body))
@@ -130,7 +130,7 @@ func registerZAIAccount(email, password string, config RegisterConfig) (*Account
 	if token == "" || emailFromURL == "" || username == "" {
 		return nil, fmt.Errorf("  ✗ 链接格式错")
 	}
-	
+
 	BroadcastLog("success", "  ✓ 链接已提取")
 
 	// 4. 完成注册（finish_signup）
@@ -143,19 +143,19 @@ func registerZAIAccount(email, password string, config RegisterConfig) (*Account
 		"token":             token,
 		"username":          username,
 	}
-	
+
 	finishBody, _ := json.Marshal(finishPayload)
 	req, _ = http.NewRequest("POST", "https://chat.z.ai/api/v1/auths/finish_signup", bytes.NewBuffer(finishBody))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	req.Header.Set("Origin", "https://chat.z.ai")
-	
+
 	resp, err = client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("  ✗ 验证失败:%v", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("  ✗ 验证失败:HTTP%d", resp.StatusCode)
 	}
@@ -166,15 +166,15 @@ func registerZAIAccount(email, password string, config RegisterConfig) (*Account
 			Token string `json:"token"`
 		} `json:"user"`
 	}
-	
+
 	if err := json.NewDecoder(resp.Body).Decode(&finishResp); err != nil {
 		return nil, fmt.Errorf("  ✗ 解析响应失败:%v", err)
 	}
-	
+
 	if !finishResp.Success || finishResp.User.Token == "" {
 		return nil, fmt.Errorf("  ✗ 验证拒绝或无Token")
 	}
-	
+
 	userToken := finishResp.User.Token
 	BroadcastLog("success", "  ✓ 获得Token")
 
@@ -199,7 +199,7 @@ func registerZAIAccount(email, password string, config RegisterConfig) (*Account
 		BroadcastLog("warning", fmt.Sprintf("  ⚠️ API登录失败:%v(仅Token)", err))
 		return account, nil // 返回账号，但没有APIKEY
 	}
-	
+
 	account.APIKEY = apikey
 	return account, nil
 }
@@ -209,22 +209,22 @@ func waitForVerificationEmail(email string, config RegisterConfig) (string, erro
 	// 使用相同的邮箱API
 	apiURL := fmt.Sprintf("https://mail.chatgpt.org.uk/api/get-emails?email=%s", email)
 	client := &http.Client{Timeout: 10 * time.Second}
-	
+
 	startTime := time.Now()
 	attempts := 0
 	maxAttempts := config.EmailTimeout / config.EmailCheckInterval
 	lastReportTime := 0
-	
+
 	for i := 0; i < maxAttempts; i++ {
 		attempts++
 		elapsed := int(time.Since(startTime).Seconds())
-		
+
 		resp, err := client.Get(apiURL)
 		if err != nil {
 			time.Sleep(time.Duration(config.EmailCheckInterval) * time.Second)
 			continue
 		}
-		
+
 		var data struct {
 			Emails []struct {
 				From    string `json:"from"`
@@ -232,10 +232,10 @@ func waitForVerificationEmail(email string, config RegisterConfig) (string, erro
 				Content string `json:"content"`
 			} `json:"emails"`
 		}
-		
+
 		json.NewDecoder(resp.Body).Decode(&data)
 		resp.Body.Close()
-		
+
 		// 每10秒报告进度
 		if elapsed-lastReportTime >= 10 && elapsed > 0 {
 			progress := int(float64(elapsed) / float64(config.EmailTimeout) * 100)
@@ -246,7 +246,7 @@ func waitForVerificationEmail(email string, config RegisterConfig) (string, erro
 			BroadcastLog("info", fmt.Sprintf("  等待邮件[%d%%] 已用:%ds/剩余:%ds(尝试%d次)", progress, elapsed, remaining, attempts))
 			lastReportTime = elapsed
 		}
-		
+
 		// 查找Z.AI的验证邮件
 		if data.Emails != nil {
 			for _, emailData := range data.Emails {
@@ -256,10 +256,10 @@ func waitForVerificationEmail(email string, config RegisterConfig) (string, erro
 				}
 			}
 		}
-		
+
 		time.Sleep(time.Duration(config.EmailCheckInterval) * time.Second)
 	}
-	
+
 	return "", fmt.Errorf("邮件超时(%ds)", config.EmailTimeout)
 }
 
@@ -270,19 +270,19 @@ func extractVerificationURL(emailContent string) string {
 	if match := re.FindString(emailContent); match != "" {
 		return strings.ReplaceAll(strings.ReplaceAll(match, "&amp;", "&"), "&#39;", "'")
 	}
-	
+
 	// 方式2: /verify_email
 	re = regexp.MustCompile(`https://chat\.z\.ai/verify_email\?[^\s<>"']+`)
 	if match := re.FindString(emailContent); match != "" {
 		return strings.ReplaceAll(strings.ReplaceAll(match, "&amp;", "&"), "&#39;", "'")
 	}
-	
+
 	// 方式3: HTML编码
 	re = regexp.MustCompile(`https?://chat\.z\.ai/(?:auth/)?verify_email[^"'\s]*`)
 	if match := re.FindString(emailContent); match != "" {
 		return strings.ReplaceAll(strings.ReplaceAll(match, "&amp;", "&"), "&#39;", "'")
 	}
-	
+
 	// 方式4: JSON格式
 	re = regexp.MustCompile(`"(https?://[^"]*verify_email[^"]*)"`)
 	if matches := re.FindStringSubmatch(emailContent); len(matches) > 1 {
@@ -292,7 +292,7 @@ func extractVerificationURL(emailContent string) string {
 		match = strings.ReplaceAll(match, "&#39;", "'")
 		return match
 	}
-	
+
 	return ""
 }
 
@@ -302,7 +302,7 @@ func parseVerificationURL(verifyURL string) (token, email, username string) {
 	if err != nil {
 		return "", "", ""
 	}
-	
+
 	query := u.Query()
 	return query.Get("token"), query.Get("email"), query.Get("username")
 }
@@ -310,14 +310,14 @@ func parseVerificationURL(verifyURL string) (token, email, username string) {
 // 获取APIKEY（完整流程）
 func getAPIKEY(token string, config RegisterConfig) (string, error) {
 	client := &http.Client{Timeout: time.Duration(config.HTTPTimeout) * time.Second}
-	
+
 	// 1. 登录API获取accessToken
 	accessToken, err := loginToAPI(token, client)
 	if err != nil {
 		return "", err
 	}
 	BroadcastLog("success", "  ✓ API登录成功")
-	
+
 	// 2. 获取客户信息（组织和项目ID）
 	BroadcastLog("info", "  → 组织...")
 	orgID, projectID, err := getCustomerInfo(accessToken, client)
@@ -326,7 +326,7 @@ func getAPIKEY(token string, config RegisterConfig) (string, error) {
 		return "", err
 	}
 	BroadcastLog("success", "  ✓ 获取组织成功")
-	
+
 	// 3. 创建APIKEY
 	BroadcastLog("info", "  → APIKEY...")
 	apikey, err := createAPIKey(accessToken, orgID, projectID, client)
@@ -335,7 +335,7 @@ func getAPIKEY(token string, config RegisterConfig) (string, error) {
 		return "", err
 	}
 	BroadcastLog("success", "  ✓ APIKEY创建成功")
-	
+
 	return apikey, nil
 }
 
@@ -343,19 +343,19 @@ func getAPIKEY(token string, config RegisterConfig) (string, error) {
 func loginToAPI(token string, client *http.Client) (string, error) {
 	payload := map[string]interface{}{"token": token}
 	body, _ := json.Marshal(payload)
-	
+
 	req, _ := http.NewRequest("POST", "https://api.z.ai/api/auth/z/login", bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	req.Header.Set("Origin", "https://z.ai")
 	req.Header.Set("Referer", "https://z.ai/")
-	
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	
+
 	var result struct {
 		Success bool `json:"success"`
 		Code    int  `json:"code"`
@@ -363,15 +363,15 @@ func loginToAPI(token string, client *http.Client) (string, error) {
 			AccessToken string `json:"access_token"`
 		} `json:"data"`
 	}
-	
+
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", err
 	}
-	
+
 	if !result.Success || result.Code != 200 || result.Data.AccessToken == "" {
 		return "", fmt.Errorf("API登录失败")
 	}
-	
+
 	return result.Data.AccessToken, nil
 }
 
@@ -382,13 +382,13 @@ func getCustomerInfo(accessToken string, client *http.Client) (string, string, e
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	req.Header.Set("Origin", "https://z.ai")
 	req.Header.Set("Referer", "https://z.ai/")
-	
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", err
 	}
 	defer resp.Body.Close()
-	
+
 	var result struct {
 		Success bool `json:"success"`
 		Code    int  `json:"code"`
@@ -401,44 +401,44 @@ func getCustomerInfo(accessToken string, client *http.Client) (string, string, e
 			} `json:"organizations"`
 		} `json:"data"`
 	}
-	
+
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", "", err
 	}
-	
+
 	if !result.Success || result.Code != 200 || len(result.Data.Organizations) == 0 {
 		return "", "", fmt.Errorf("获取组织失败")
 	}
-	
+
 	org := result.Data.Organizations[0]
 	if len(org.Projects) == 0 {
 		return "", "", fmt.Errorf("无可用项目")
 	}
-	
+
 	return org.OrganizationID, org.Projects[0].ProjectID, nil
 }
 
 // 创建APIKEY
 func createAPIKey(accessToken, orgID, projectID string, client *http.Client) (string, error) {
 	url := fmt.Sprintf("https://api.z.ai/api/biz/v1/organization/%s/projects/%s/api_keys", orgID, projectID)
-	
+
 	randomName := fmt.Sprintf("key_%d", time.Now().UnixNano())
 	payload := map[string]interface{}{"name": randomName}
 	body, _ := json.Marshal(payload)
-	
+
 	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(body))
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	req.Header.Set("Origin", "https://z.ai")
 	req.Header.Set("Referer", "https://z.ai/")
-	
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	
+
 	var result struct {
 		Success bool `json:"success"`
 		Code    int  `json:"code"`
@@ -447,21 +447,21 @@ func createAPIKey(accessToken, orgID, projectID string, client *http.Client) (st
 			SecretKey string `json:"secretKey"`
 		} `json:"data"`
 	}
-	
+
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", err
 	}
-	
+
 	if !result.Success || result.Code != 200 {
 		return "", fmt.Errorf("创建APIKEY失败")
 	}
-	
+
 	// 拼接APIKEY（格式: apiKey.secretKey）
 	finalKey := fmt.Sprintf("%s.%s", result.Data.APIKey, result.Data.SecretKey)
 	if finalKey == "." || result.Data.APIKey == "" || result.Data.SecretKey == "" {
 		return "", fmt.Errorf("APIKEY无效")
 	}
-	
+
 	return finalKey, nil
 }
 
@@ -500,12 +500,12 @@ func BatchRegisterAccounts(count int, config RegisterConfig, logChan chan<- stri
 	if config.SkipAPIKey {
 		skipMode = "是(稍后批量获取)"
 	}
-	BroadcastLog("info", fmt.Sprintf("⚙️ 配置: 并发=%d 间隔=%dms 快速=%s 超时=%ds", 
+	BroadcastLog("info", fmt.Sprintf("⚙️ 配置: 并发=%d 间隔=%dms 快速=%s 超时=%ds",
 		config.Concurrency, config.RegisterDelay, skipMode, config.EmailTimeout))
 
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, config.Concurrency)
-	
+
 	for i := 0; i < count; i++ {
 		if currentTask.ShouldStop {
 			BroadcastLog("warning", "⏹️ 用户停止注册")
@@ -521,9 +521,9 @@ func BatchRegisterAccounts(count int, config RegisterConfig, logChan chan<- stri
 			email := generateEmail()
 			password := generatePassword()
 			emailCheckURL := fmt.Sprintf("https://mail.chatgpt.org.uk/api/get-emails?email=%s", email)
-			
+
 			BroadcastLogWithLink("info", fmt.Sprintf("▶ 开始:%s", email), "邮箱", emailCheckURL)
-			
+
 			for retry := 0; retry < config.RetryTimes; retry++ {
 				account, err := registerZAIAccount(email, password, config)
 				if err != nil {
@@ -536,11 +536,11 @@ func BatchRegisterAccounts(count int, config RegisterConfig, logChan chan<- stri
 					currentTask.Failed++
 					break
 				}
-				
+
 				if err := SaveAccount(account); err != nil {
 					BroadcastLog("warning", fmt.Sprintf("⚠️ 保存失败:%v", err))
 				}
-				
+
 				// 根据模式和APIKEY情况输出不同消息
 				if config.SkipAPIKey {
 					BroadcastLog("success", fmt.Sprintf("✅ 快速完成:%s(稍后获取KEY)", email))
@@ -552,10 +552,10 @@ func BatchRegisterAccounts(count int, config RegisterConfig, logChan chan<- stri
 				currentTask.Success++
 				break
 			}
-			
+
 			// 广播进度
 			BroadcastProgress(currentTask.Total, currentTask.Success, currentTask.Failed)
-			
+
 			// 间隔延迟
 			time.Sleep(time.Duration(config.RegisterDelay) * time.Millisecond)
 		}(i)
@@ -563,11 +563,11 @@ func BatchRegisterAccounts(count int, config RegisterConfig, logChan chan<- stri
 
 	wg.Wait()
 	currentTask.IsRunning = false
-	
+
 	elapsed := time.Since(currentTask.StartTime)
-	BroadcastLog("success", fmt.Sprintf("🎉 注册完成! 成功: %d, 失败: %d, 耗时: %.1fs", 
+	BroadcastLog("success", fmt.Sprintf("🎉 注册完成! 成功: %d, 失败: %d, 耗时: %.1fs",
 		currentTask.Success, currentTask.Failed, elapsed.Seconds()))
-	
+
 	// 发送完成事件
 	completeData := map[string]interface{}{
 		"type":    "complete",
@@ -577,7 +577,7 @@ func BatchRegisterAccounts(count int, config RegisterConfig, logChan chan<- stri
 		"elapsed": elapsed.Seconds(),
 	}
 	data, _ := json.Marshal(completeData)
-	
+
 	sseClientMutex.RLock()
 	for client := range sseClients {
 		select {
@@ -586,9 +586,9 @@ func BatchRegisterAccounts(count int, config RegisterConfig, logChan chan<- stri
 		}
 	}
 	sseClientMutex.RUnlock()
-	
+
 	// 发送通知
-	notifyContent := fmt.Sprintf("## 注册任务完成\n\n- 总数: %d\n- 成功: %d\n- 失败: %d\n- 耗时: %.1fs", 
+	notifyContent := fmt.Sprintf("## 注册任务完成\n\n- 总数: %d\n- 成功: %d\n- 失败: %d\n- 耗时: %.1fs",
 		currentTask.Total, currentTask.Success, currentTask.Failed, elapsed.Seconds())
 	sendNotification("Z.AI 注册完成", notifyContent, config)
 }
@@ -598,14 +598,14 @@ func GetAccounts(page, pageSize int, filter, search string) ([]Account, int64, e
 	// 构建查询条件
 	where := "1=1"
 	args := []interface{}{}
-	
+
 	// 搜索功能
 	if search != "" {
 		where += " AND (email LIKE ? OR password LIKE ? OR token LIKE ? OR apikey LIKE ?)"
 		searchPattern := "%" + search + "%"
 		args = append(args, searchPattern, searchPattern, searchPattern, searchPattern)
 	}
-	
+
 	// 快速筛选
 	if filter == "has-apikey" {
 		where += " AND apikey IS NOT NULL AND apikey != ''"
@@ -636,7 +636,7 @@ func GetAccounts(page, pageSize int, filter, search string) ([]Account, int64, e
 		ORDER BY created_at DESC
 		LIMIT ? OFFSET ?
 	`, where)
-	
+
 	queryArgs := append(args, pageSize, offset)
 	rows, err := db.Query(query, queryArgs...)
 	if err != nil {
@@ -664,23 +664,47 @@ func GetAccounts(page, pageSize int, filter, search string) ([]Account, int64, e
 // 获取统计信息
 func GetStats() (*Stats, error) {
 	stats := &Stats{}
-	
+
 	// 总账号数
 	db.QueryRow("SELECT COUNT(*) FROM accounts").Scan(&stats.TotalAccounts)
-	
+
 	// 有APIKEY的账号数
 	db.QueryRow("SELECT COUNT(*) FROM accounts WHERE apikey != ''").Scan(&stats.WithAPIKEY)
-	
+
 	// 无APIKEY的账号数
 	db.QueryRow("SELECT COUNT(*) FROM accounts WHERE apikey IS NULL OR apikey = ''").Scan(&stats.WithoutAPIKEY)
-	
+
 	// 活跃账号数
 	db.QueryRow("SELECT COUNT(*) FROM accounts WHERE status = 'active'").Scan(&stats.ActiveAccounts)
-	
+
 	// 失效账号数
 	db.QueryRow("SELECT COUNT(*) FROM accounts WHERE status = 'inactive'").Scan(&stats.InactiveAccounts)
-	
+
 	return stats, nil
+}
+
+// 获取随机 token（用于API请求）
+func GetRandomToken() (string, error) {
+	if db == nil {
+		return "", fmt.Errorf("数据库未初始化")
+	}
+
+	var token string
+
+	// 只从 active 状态的账号中随机获取 token
+	err := db.QueryRow(`
+		SELECT token FROM accounts 
+		WHERE token IS NOT NULL AND token != '' 
+		AND status = 'active'
+		ORDER BY RANDOM() 
+		LIMIT 1
+	`).Scan(&token)
+
+	if err != nil {
+		return "", err
+	}
+
+	return token, nil
 }
 
 // 删除账号
@@ -694,15 +718,15 @@ func BatchDeleteAccounts(emails []string) error {
 	if len(emails) == 0 {
 		return nil
 	}
-	
+
 	placeholders := strings.Repeat("?,", len(emails)-1) + "?"
 	query := fmt.Sprintf("DELETE FROM accounts WHERE email IN (%s)", placeholders)
-	
+
 	args := make([]interface{}, len(emails))
 	for i, email := range emails {
 		args[i] = email
 	}
-	
+
 	_, err := db.Exec(query, args...)
 	return err
 }
@@ -840,7 +864,7 @@ func BatchCheckAccounts(emails []string, logChan chan<- string) (int, int) {
 
 	wg.Wait()
 	BroadcastLog("success", fmt.Sprintf("🎉 批量检测完成！正常: %d, 失效: %d", active, inactive))
-	
+
 	// 发送检测完成事件
 	checkCompleteData := map[string]interface{}{
 		"type":     "check_complete",
@@ -849,7 +873,7 @@ func BatchCheckAccounts(emails []string, logChan chan<- string) (int, int) {
 		"total":    len(emails),
 	}
 	data, _ := json.Marshal(checkCompleteData)
-	
+
 	sseClientMutex.RLock()
 	for client := range sseClients {
 		select {
@@ -858,7 +882,7 @@ func BatchCheckAccounts(emails []string, logChan chan<- string) (int, int) {
 		}
 	}
 	sseClientMutex.RUnlock()
-	
+
 	return active, inactive
 }
 
@@ -866,7 +890,7 @@ func BatchCheckAccounts(emails []string, logChan chan<- string) (int, int) {
 func checkAccountStatus(token string) bool {
 	config := GetConfig()
 	client := &http.Client{Timeout: time.Duration(config.HTTPTimeout) * time.Second}
-	
+
 	// 尝试API登录
 	_, err := loginToAPI(token, client)
 	return err == nil
@@ -892,4 +916,3 @@ func UpdateAccountAPIKEY(email, apikey string) error {
 	`, apikey, email)
 	return err
 }
-
